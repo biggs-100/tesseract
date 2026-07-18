@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+[package]
+name = "tesseract-api"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.85"
+
+[dependencies]
+axum = { version = "0.7", features = ["json"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tesseract-vql = { path = "../tesseract-vql" }
+tesseract-storage = { path = "../tesseract-storage" }
+tesseract-core = { path = "../tesseract-core" }
+tesseract-common = { path = "../tesseract-common" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+async-trait = "0.1"
+tempfile = "3"
+
+[[bin]]
+name = "tesseract-server"
+path = "src/main.rs"

@@ -1,0 +1,71 @@
+schema: spec-driven
+
+context: |
+  Project: VQL (Vector Query Language) — the query language for Tesseract
+  Tech stack: Rust (planned, no Cargo.toml yet)
+  Architecture: Semantic-Relational Layered Database Engine
+  Testing: cargo test (target, not configured yet)
+  Style: Rust standard idioms
+  Status: Greenfield — no existing codebase
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    guidelines:
+      - Follow existing Rust idioms and patterns
+    tdd: false
+    test_command: "cargo test"
+  verify:
+    test_command: "cargo test"
+    build_command: "cargo build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+
+testing:
+  strict_tdd: false
+  note: "Strict TDD disabled because no Cargo.toml or tests exist yet. Enable once project has test infrastructure."
+  runner:
+    command: "cargo test"
+    framework: "built-in Rust test harness"
+    status: pending
+  layers:
+    unit:
+      available: false
+      tool: "#[cfg(test)] mod tests — Rust built-in"
+      note: Available once Cargo.toml is created
+    integration:
+      available: false
+      tool: "cargo test — integration test directory"
+      note: Available once Cargo.toml is created
+    e2e:
+      available: false
+      tool: —
+      note: None defined yet
+  coverage:
+    available: false
+    command: "cargo tarpaulin"  # or "cargo llvm-cov"
+    note: Third-party tool, not configured yet
+  quality:
+    linter:
+      available: false
+      command: "cargo clippy"
+      note: Available once Cargo.toml is created
+    formatter:
+      available: false
+      command: "cargo fmt"
+      note: Available once Cargo.toml is created
+    type_checker:
+      available: false
+      command: "cargo check"
+      note: Available once Cargo.toml is created

@@ -1,0 +1,23 @@
+schema: spec-driven
+change: fase-1-storage-engine
+created: 2026-07-14
+phases:
+  explore: done
+  propose: done
+  spec: done
+  design: done
+  tasks: pending
+  apply: pending
+  verify: pending
+  archive: pending
+artifacts:
+  exploration: openspec/changes/fase-1-storage-engine/exploration.md
+  proposal: openspec/changes/fase-1-storage-engine/proposal.md
+  specs:
+    - openspec/changes/fase-1-storage-engine/specs/wal-engine/spec.md
+    - openspec/changes/fase-1-storage-engine/specs/hot-tier/spec.md
+    - openspec/changes/fase-1-storage-engine/specs/cold-tier/spec.md
+    - openspec/changes/fase-1-storage-engine/specs/vector-skeleton/spec.md
+    - openspec/changes/fase-1-storage-engine/specs/page-cache/spec.md
+    - openspec/changes/fase-1-storage-engine/specs/tier-lifecycle/spec.md
+  design: openspec/changes/fase-1-storage-engine/design.md

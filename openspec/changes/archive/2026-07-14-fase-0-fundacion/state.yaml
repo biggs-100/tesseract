@@ -1,0 +1,23 @@
+schema: spec-driven
+change: fase-0-fundacion
+created: 2026-07-14
+phases:
+  explore: done
+  propose: done
+  spec: done
+  design: done
+  tasks: done
+  apply: in_progress
+  verify: pending
+  archive: pending
+artifacts:
+  exploration: openspec/changes/fase-0-fundacion/exploration.md
+  proposal: openspec/changes/fase-0-fundacion/proposal.md
+  specs:
+    - openspec/changes/fase-0-fundacion/specs/project-scaffold/spec.md
+    - openspec/changes/fase-0-fundacion/specs/vql-grammar/spec.md
+    - openspec/changes/fase-0-fundacion/specs/math-foundation/spec.md
+  design: openspec/changes/fase-0-fundacion/design.md
+  tasks: openspec/changes/fase-0-fundacion/tasks.md
+  apply:
+    - PR 1: workspace scaffold

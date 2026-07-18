@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+[workspace]
+resolver = "2"
+members = [
+    "tesseract-common",
+    "tesseract-core",
+    "tesseract-storage",
+    "tesseract-index",
+    "tesseract-vql",
+    "tesseract-api",
+    "tesseract-cluster",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.85"

@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+pub mod error;

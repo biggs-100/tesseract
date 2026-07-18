@@ -1,0 +1,14 @@
+schema: spec-driven
+change: fase-4-escalabilidad
+created: 2026-07-17
+phases:
+  explore: done
+  propose: pending
+  spec: pending
+  design: pending
+  tasks: pending
+  apply: pending
+  verify: pending
+  archive: pending
+artifacts:
+  exploration: openspec/changes/fase-4-escalabilidad/exploration.md

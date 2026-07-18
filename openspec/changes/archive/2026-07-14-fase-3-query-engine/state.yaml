@@ -1,0 +1,13 @@
+schema: spec-driven
+change: fase-3-query-engine
+created: 2026-07-14
+phases:
+  explore: done
+  propose: done
+  spec: done
+  design: pending
+  tasks: pending
+  apply: pending
+  verify: pending
+  archive: done
+artifacts: {}

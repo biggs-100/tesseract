@@ -1,0 +1,13 @@
+schema: spec-driven
+change: fase-0-fundacion
+created: 2026-07-14
+archived: 2026-07-14
+phases:
+  explore: done
+  propose: done
+  spec: done
+  design: done
+  tasks: done
+  apply: done
+  verify: done
+  archive: done

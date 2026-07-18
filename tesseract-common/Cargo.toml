@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+[package]
+name = "tesseract-common"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.85"
+
+[dependencies]
+thiserror = "2"
+bincode = "1"
