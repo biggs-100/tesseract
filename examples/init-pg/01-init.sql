@@ -1,0 +1,16 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
+-- SPDX-FileCopyrightText: 2026 Tesseract Contributors
+--
+-- PostgreSQL init script loaded automatically by docker-compose.
+--
+-- NOTE: The tesseract_fdw extension must be pre-installed into the
+-- postgres:16 image separately. This script documents the SQL statements
+-- to run once the extension library is available.
+--
+-- Build the extension:
+--   cargo pgrx init --pg16
+--   cargo pgrx install -p tesseract-pg
+
+-- Afterwards, connect and run:
+--   CREATE EXTENSION IF NOT EXISTS tesseract_fdw;
+--   SELECT tesseract_connect('tesseract', 3000);

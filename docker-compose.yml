@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+# Tesseract DB + PostgreSQL 16 quickstart environment.
+#
+# Start with:   docker compose up -d
+# Check status: docker compose ps
+# Stop:         docker compose down -v  (⚠️  -v removes volumes)
+#
+# Once running, connect via the PG extension:
+#   docker compose exec postgres psql -U tesseract -d tesseract
+#   => CREATE EXTENSION tesseract_fdw;
+#   => SELECT tesseract_connect('tesseract', 3000);
+#   => SELECT * FROM tesseract_query('...');
+
+services:
+  tesseract:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/tesseract-db/tesseract-server:latest
+    ports:
+      - "8081:3000"
+    volumes:
+      - tesseract_data:/data
+    environment:
+      - TESSERACT_DATA_DIR=/data
+      - TESSERACT_LISTEN_ADDR=0.0.0.0:3000
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: tesseract
+      POSTGRES_USER: tesseract
+      POSTGRES_PASSWORD: tesseract
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./examples/init-pg:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tesseract -d tesseract"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      tesseract:
+        condition: service_healthy
+
+volumes:
+  tesseract_data:
+  postgres_data:

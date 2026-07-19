@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Publish all workspace crates to crates.io in dependency order
+  # -------------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Publish tesseract-common
+        run: cargo publish -p tesseract-common --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish tesseract-core
+        run: cargo publish -p tesseract-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish tesseract-storage
+        run: cargo publish -p tesseract-storage --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish tesseract-index
+        run: cargo publish -p tesseract-index --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish tesseract-vql
+        run: cargo publish -p tesseract-vql --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish tesseract-api
+        run: cargo publish -p tesseract-api --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish tesseract-cluster
+        run: cargo publish -p tesseract-cluster --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # -------------------------------------------------------------------------
+  # Build and push the Docker image to GitHub Container Registry
+  # -------------------------------------------------------------------------
+  docker:
+    name: Build & push Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------------------
+  # Create a GitHub Release with the compiled binary attached
+  # -------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [publish, docker]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Build release binary
+        run: cargo build --release -p tesseract-api
+      - name: Archive binary
+        run: |
+          mkdir -p dist
+          cp target/release/tesseract-server dist/
+          cd dist && sha256sum tesseract-server > tesseract-server.sha256
+      - name: Generate changelog excerpt
+        id: notes
+        run: |
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          sed -n '/^## \[$(echo ${{ github.ref_name }} | sed 's/^v//')\]/,/^## \[/p' CHANGELOG.md | head -n -1 >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tesseract-server
+            dist/tesseract-server.sha256
+          body: ${{ steps.notes.outputs.CHANGELOG }}
+          draft: false
+          prerelease: false

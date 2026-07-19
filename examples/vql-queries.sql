@@ -1,0 +1,75 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
+-- SPDX-FileCopyrightText: 2026 Tesseract Contributors
+--
+-- Sample VQL Queries
+-- ==================
+--
+-- These examples demonstrate the VQL query syntax against the Tesseract
+-- HTTP API. Send them via POST /query with:
+--
+--   curl -X POST http://localhost:3000/query \
+--     -H "Content-Type: application/json" \
+--     -d '{"vql": "<query>"}'
+--
+-- Prerequisites: Insert some vectors first (see quickstart.sh).
+
+-- ── 1. Basic similarity search ───────────────────────────────────────
+-- Find the top 5 vectors closest to the given embedding.
+-- VQL: FIND SIMILARITY(<field>, [<vector>]) LIMIT <n>
+--
+-- HTTP body:
+-- {"vql": "FIND SIMILARITY(emb, [0.1, 0.2, 0.3]) LIMIT 5"}
+
+-- ── 2. Similarity search with metadata filter ────────────────────────
+-- Filter results by a metadata field (PostgreSQL-style JSON path).
+--
+-- HTTP body:
+-- {"vql": "FIND SIMILARITY(emb, [0.1, 0.2, 0.3]) WHERE metadata->>'\''source'\'' = '\''news'\'' LIMIT 10"}
+
+-- ── 3. Pagination with OFFSET ───────────────────────────────────────
+-- Skip the first N results and return the next LIMIT.
+--
+-- HTTP body:
+-- {"vql": "FIND SIMILARITY(emb, [0.1, 0.2, 0.3]) LIMIT 10 OFFSET 20"}
+
+-- ── 4. Insert a vector ──────────────────────────────────────────────
+-- (Inserts use POST /insert, not VQL directly.)
+--
+-- HTTP body:
+-- {
+--   "id": 100,
+--   "vector": [0.25, 0.50, 0.75],
+--   "metadata": {"title": "Example document", "source": "manual"}
+-- }
+
+-- ── 5. Hybrid query ─────────────────────────────────────────────────
+-- Combine vector similarity with metadata conditions.
+--
+-- HTTP body:
+-- {"vql": "FIND SIMILARITY(emb, [0.1, 0.2, 0.3]) WHERE metadata->>'\''category'\'' = '\''science'\'' LIMIT 5"}
+
+-- ── 6. Full workflow example ────────────────────────────────────────
+--
+-- Step 1 — Insert documents:
+--   curl -X POST http://localhost:3000/insert \
+--     -H "Content-Type: application/json" \
+--     -d '{"id": 1, "vector": [0.1, 0.2, 0.3], "metadata": {"title": "Quantum mechanics", "category": "science"}}'
+--   curl -X POST http://localhost:3000/insert \
+--     -H "Content-Type: application/json" \
+--     -d '{"id": 2, "vector": [0.4, 0.5, 0.6], "metadata": {"title": "Rust programming", "category": "tech"}}'
+--   curl -X POST http://localhost:3000/insert \
+--     -H "Content-Type: application/json" \
+--     -d '{"id": 3, "vector": [0.7, 0.8, 0.9], "metadata": {"title": "Beethoven symphonies", "category": "music"}}'
+--
+-- Step 2 — Find science content similar to a quantum mechanics query:
+--   curl -X POST http://localhost:3000/query \
+--     -H "Content-Type: application/json" \
+--     -d '{"vql": "FIND SIMILARITY(emb, [0.12, 0.22, 0.32]) WHERE metadata->>'\''category'\'' = '\''science'\'' LIMIT 3"}'
+--
+-- Step 3 — Paginate through all results:
+--   curl -X POST http://localhost:3000/query \
+--     -H "Content-Type: application/json" \
+--     -d '{"vql": "FIND SIMILARITY(emb, [0.12, 0.22, 0.32]) LIMIT 2 OFFSET 0"}'
+--   curl -X POST http://localhost:3000/query \
+--     -H "Content-Type: application/json" \
+--     -d '{"vql": "FIND SIMILARITY(emb, [0.12, 0.22, 0.32]) LIMIT 2 OFFSET 2"}'
