@@ -6,6 +6,7 @@
 
 pub mod distance;
 pub mod hnsw;
+pub mod merkle;
 pub mod serialization;
 pub mod topological_index;
 pub mod types;
