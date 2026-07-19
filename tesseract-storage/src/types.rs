@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Tesseract Contributors
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 // Re-export sub-config types for StorageConfig composition.
@@ -136,6 +139,52 @@ impl Default for IndexConfig {
     }
 }
 
+/// Topological bias configuration.
+///
+/// Controls whether query-time vector biasing is enabled and which
+/// metadata fields are tracked for centroid and correlation statistics.
+#[derive(Debug, Clone, Default)]
+pub struct TopologicalConfig {
+    /// Whether topological biasing is enabled.
+    pub enabled: bool,
+    /// Metadata fields whose string values are tracked as categorical
+    /// centroids (e.g. `["category", "genre"]`).
+    pub categorical_fields: Vec<String>,
+    /// Metadata fields whose numeric values are tracked for dimension-wise
+    /// correlation (e.g. `["year", "price"]`).
+    pub numerical_fields: Vec<String>,
+    /// Bucket boundaries for numerical fields tracked with bucketized
+    /// centroids (supersedes correlation-based bias for these fields).
+    /// Map of field_name → sorted bucket boundaries.
+    /// E.g., `{ "year": vec![2015.0, 2018.0, 2021.0, 2024.0] }`
+    /// creates 4 buckets: <2018, 2018-2021, 2021-2024, >=2024.
+    pub numerical_buckets: HashMap<String, Vec<f64>>,
+}
+
+/// Merkle tree / hot buffer configuration.
+#[derive(Debug, Clone)]
+pub struct MerkleConfig {
+    /// Whether the progressive Merkle tree is enabled.
+    pub enabled: bool,
+    /// Maximum vectors in the hot buffer before merge is triggered.
+    pub hot_buffer_capacity: usize,
+    /// Maximum vectors per cluster before splitting.
+    pub max_cluster_size: usize,
+    /// Optional path for persisting the Merkle tree to disk.
+    pub merkle_tree_path: Option<PathBuf>,
+}
+
+impl Default for MerkleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hot_buffer_capacity: 10_000,
+            max_cluster_size: 1_000,
+            merkle_tree_path: None,
+        }
+    }
+}
+
 /// Top-level storage engine configuration.
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
@@ -146,4 +195,6 @@ pub struct StorageConfig {
     pub skeleton: SkeletonConfig,
     pub lifecycle: LifecycleConfig,
     pub index: IndexConfig,
+    pub topological: TopologicalConfig,
+    pub merkle: MerkleConfig,
 }

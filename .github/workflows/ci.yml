@@ -21,7 +21,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - run: cargo check --workspace
+      - run: cargo check --workspace --exclude tesseract-pg
 
   lint:
     name: cargo clippy
@@ -32,7 +32,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --workspace --exclude tesseract-pg -- -D warnings
 
   fmt:
     name: cargo fmt
@@ -56,7 +56,24 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude tesseract-pg
+
+  pg-extension:
+    name: cargo test (tesseract-pg)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install PostgreSQL development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpq-dev \
+            postgresql-server-dev-16
+      - name: Build and test (no PG runtime)
+        run: cargo test -p tesseract-pg --lib --no-default-features
 
   audit:
     name: cargo deny

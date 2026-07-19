@@ -8,6 +8,10 @@ edition = "2024"
 license = "AGPL-3.0"
 rust-version = "1.85"
 
+[features]
+default = []
+grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:tokio-stream", "tonic-build"]
+
 [dependencies]
 axum = { version = "0.7", features = ["json"] }
 tower = { version = "0.4", features = ["util"] }
@@ -21,6 +25,15 @@ tesseract-vql = { path = "../tesseract-vql" }
 tesseract-storage = { path = "../tesseract-storage" }
 tesseract-core = { path = "../tesseract-core" }
 tesseract-common = { path = "../tesseract-common" }
+
+# gRPC dependencies (optional, enabled via `--features grpc`)
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+prost-types = { version = "0.13", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
+[build-dependencies]
+tonic-build = { version = "0.12", optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"

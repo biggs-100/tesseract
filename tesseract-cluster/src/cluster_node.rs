@@ -132,6 +132,8 @@ mod tests {
             cache: Default::default(),
             skeleton: Default::default(),
             lifecycle: Default::default(),
+            topological: Default::default(),
+            merkle: Default::default(),
         };
         let storage = Arc::new(tesseract_storage::StorageEngine::open(storage_config).await.unwrap());
 

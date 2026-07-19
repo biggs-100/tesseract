@@ -42,6 +42,8 @@ fn make_config(dir: &tempfile::TempDir) -> StorageConfig {
             },
             path: dir.path().join("index.hnsw"),
         },
+        topological: Default::default(),
+        merkle: Default::default(),
     }
 }
 
@@ -148,6 +150,8 @@ async fn test_engine_search_disabled_index_returns_error() {
             cold_min_access: 5,
         },
         index: IndexConfig { enabled: false, ..Default::default() },
+        topological: Default::default(),
+        merkle: Default::default(),
     };
 
     let engine = StorageEngine::open(config).await.unwrap();

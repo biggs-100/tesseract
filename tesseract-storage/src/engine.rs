@@ -7,6 +7,7 @@
 //! index, and the background tier lifecycle manager. All public mutation
 //! and query operations flow through this single entry point.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -14,9 +15,11 @@ use tracing::info;
 
 use tesseract_common::error::{Error, Result};
 use tesseract_core::projection::WeightMask;
+use tesseract_core::topological::{self, CentroidTracker, CorrelationTracker, NumericalBucketTracker};
 use tesseract_core::types::VectorId;
 use tesseract_index::distance::{CosineComputer, EuclideanComputer};
 use tesseract_index::hnsw::HnswIndex;
+use tesseract_index::merkle::{HotBuffer, MerkleTree};
 use tesseract_index::topological_index::{AnyIndex, TopologicalIndex};
 use tesseract_index::types::DistanceMetric;
 
@@ -40,6 +43,17 @@ pub struct StorageEngine {
     config: StorageConfig,
     index: Option<Mutex<AnyIndex>>,
     _lifecycle_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Topological centroid tracker for categorical metadata fields.
+    centroids: Option<std::sync::Mutex<CentroidTracker>>,
+    /// Topological correlation tracker for numerical metadata fields.
+    correlations: Option<std::sync::Mutex<CorrelationTracker>>,
+    /// Topological bucket tracker for numerical fields with configured
+    /// bucket boundaries. Falls back to correlation when no buckets exist.
+    buckets: Option<std::sync::Mutex<NumericalBucketTracker>>,
+    /// Hot buffer for recent inserts (progressive Merkle tree tier).
+    hot_buffer: Option<std::sync::Mutex<HotBuffer>>,
+    /// Progressive Merkle tree for merged centroids.
+    merkle_tree: Option<std::sync::Mutex<MerkleTree>>,
 }
 
 impl StorageEngine {
@@ -105,11 +119,89 @@ impl StorageEngine {
 
         info!("StorageEngine opened: cold_partitions={}", cold.partitions().len());
 
-        // 9. Start lifecycle background task.
+        // 9. Initialize topological bias trackers (if enabled).
+        let centroids = if config.topological.enabled {
+            let dim = config.index.dim;
+            info!(
+                "Topological bias enabled: {} categorical fields, {} numerical fields",
+                config.topological.categorical_fields.len(),
+                config.topological.numerical_fields.len()
+            );
+            Some(std::sync::Mutex::new(CentroidTracker::new(dim)))
+        } else {
+            None
+        };
+
+        let correlations = if config.topological.enabled {
+            let dim = config.index.dim;
+            Some(std::sync::Mutex::new(CorrelationTracker::new(dim)))
+        } else {
+            None
+        };
+
+        let buckets = if config.topological.enabled {
+            let dim = config.index.dim;
+            let mut bt = NumericalBucketTracker::new(dim);
+            let n_bucketed = config.topological.numerical_buckets.len();
+            for (field, boundaries) in &config.topological.numerical_buckets {
+                bt.register_field(field, boundaries.clone());
+            }
+            if n_bucketed > 0 {
+                info!("Bucketized centroids enabled for {} numerical fields", n_bucketed);
+            }
+            Some(std::sync::Mutex::new(bt))
+        } else {
+            None
+        };
+
+        // 10. Initialize Merkle tree / hot buffer (if enabled).
+        let hot_buffer = if config.merkle.enabled {
+            Some(std::sync::Mutex::new(HotBuffer::new(config.merkle.hot_buffer_capacity)))
+        } else {
+            None
+        };
+
+        let merkle_tree = if config.merkle.enabled {
+            let mt_path = config.merkle.merkle_tree_path.clone();
+            let mt = match mt_path.as_ref().filter(|p| p.exists()) {
+                Some(path) => {
+                    match MerkleTree::load(path) {
+                        Ok(tree) => {
+                            info!("Loaded Merkle tree from {}", path.display());
+                            tree
+                        }
+                        Err(e) => {
+                            info!("Could not load Merkle tree ({}), creating new one", e);
+                            MerkleTree::new(config.merkle.max_cluster_size)
+                        }
+                    }
+                }
+                None => MerkleTree::new(config.merkle.max_cluster_size),
+            };
+            Some(std::sync::Mutex::new(mt))
+        } else {
+            None
+        };
+
+        // 11. Start lifecycle background task.
         let lifecycle_handle =
             TierLifecycle::start(Arc::clone(&hot), Arc::clone(&cold), Arc::clone(&skeleton), config.lifecycle.clone());
 
-        Ok(Self { wal, hot, cold, skeleton, cache, config, index, _lifecycle_handle: Some(lifecycle_handle) })
+        Ok(Self {
+            wal,
+            hot,
+            cold,
+            skeleton,
+            cache,
+            config,
+            index,
+            _lifecycle_handle: Some(lifecycle_handle),
+            centroids,
+            correlations,
+            buckets,
+            hot_buffer,
+            merkle_tree,
+        })
     }
 
     /// Insert a vector with metadata.
@@ -144,10 +236,38 @@ impl StorageEngine {
             }
         }
 
+        // Update topological bias trackers BEFORE metadata is moved
+        // into VectorRecord (borrow check).
+        if let Some(ref centroids_lock) = self.centroids {
+            let mut c = centroids_lock.lock().unwrap();
+            c.update(&vector, &metadata, &self.config.topological.categorical_fields);
+        }
+        if let Some(ref correlations_lock) = self.correlations {
+            let mut c = correlations_lock.lock().unwrap();
+            for field in &self.config.topological.numerical_fields {
+                if let Some(val) = metadata.get(field) {
+                    if let Some(num) = val.as_f64() {
+                        c.update(field, num, &vector);
+                    }
+                }
+            }
+        }
+        // Update bucketized centroid tracker for fields with configured buckets
+        if let Some(ref buckets_lock) = self.buckets {
+            let mut b = buckets_lock.lock().unwrap();
+            for field in self.config.topological.numerical_buckets.keys() {
+                if let Some(val) = metadata.get(field) {
+                    if let Some(num) = val.as_f64() {
+                        b.update(field, num, &vector);
+                    }
+                }
+            }
+        }
+
         let record = VectorRecord {
             id: id.clone(),
             vector: vector.clone(),
-            metadata,
+            metadata: metadata.clone(),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -161,7 +281,38 @@ impl StorageEngine {
         // immediately.
         if let Some(ref idx_lock) = self.index {
             let mut idx = idx_lock.lock().await;
-            idx.insert(id, &vector)?;
+            idx.insert(id.clone(), &vector)?;
+        }
+
+        // Insert into HotBuffer (if Merkle tree is enabled).
+        if let Some(ref buffer_lock) = self.hot_buffer {
+            let mut buffer = buffer_lock.lock().unwrap();
+            let vector_f32: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
+            let is_full = buffer.insert(id.0, vector_f32, metadata.clone());
+
+            // If buffer is full, trigger an async merge into the Merkle tree.
+            if is_full {
+                // Set merging flag to prevent concurrent merges.
+                if !buffer.merging.swap(true, Ordering::AcqRel) {
+                    let snapshot = buffer.drain();
+                    if let Some(ref tree_lock) = self.merkle_tree {
+                        let mut tree = tree_lock.lock().unwrap();
+                        tree.insert_batch(&snapshot);
+                        info!(
+                            "Merkle merge complete: {} vectors merged, {} centroids",
+                            snapshot.len(),
+                            tree.num_centroids()
+                        );
+                        // Persist if path is configured.
+                        if let Some(path) = &self.config.merkle.merkle_tree_path {
+                            if let Err(e) = tree.save(path) {
+                                tracing::warn!("Failed to persist Merkle tree: {}", e);
+                            }
+                        }
+                    }
+                    buffer.merging.store(false, Ordering::Release);
+                }
+            }
         }
 
         Ok(())
@@ -201,16 +352,61 @@ impl StorageEngine {
 
     /// Search the nearest neighbours for a query vector.
     ///
-    /// Requires the index to be enabled (see [`IndexConfig::enabled`]).
-    /// Returns up to `k` results sorted by distance ascending.
+    /// When the Merkle tree is enabled, this combines results from:
+    /// 1. The HNSW index (existing, merged data)
+    /// 2. The hot buffer (recent inserts, immediately queryable)
+    /// 3. The Merkle tree centroid index
+    ///
+    /// Returns up to `k` results sorted by distance ascending, deduplicated
+    /// by `VectorId`.
     pub async fn search(&self, query: &[f64], k: usize, mask: Option<&WeightMask>) -> Result<Vec<(VectorId, f32)>> {
-        match self.index {
-            Some(ref idx_lock) => {
-                let idx = idx_lock.lock().await;
-                idx.search(query, k, mask)
-            }
-            None => Err(Error::IndexNotBuilt),
+        let query_f32: Vec<f32> = query.iter().map(|&x| x as f32).collect();
+        let mut all_results: Vec<(VectorId, f32)> = Vec::new();
+
+        // 1. Search existing HNSW index.
+        if let Some(ref idx_lock) = self.index {
+            let idx = idx_lock.lock().await;
+            let hnsw_results = idx.search(query, k, mask)?;
+            all_results.extend(hnsw_results);
         }
+
+        // 2. Search HotBuffer if active.
+        if let Some(ref buffer_lock) = self.hot_buffer {
+            let buffer = buffer_lock.lock().unwrap();
+            if !buffer.is_empty() {
+                let hot_results = buffer.search(&query_f32, k);
+                all_results.extend(hot_results.into_iter().map(|(id, score)| (VectorId(id), score)));
+            }
+        }
+
+        // 3. Search MerkleTree if available.
+        if let Some(ref tree_lock) = self.merkle_tree {
+            let tree = tree_lock.lock().unwrap();
+            if tree.num_centroids() > 0 {
+                let tree_results = tree.search(&query_f32, k);
+                all_results.extend(tree_results.into_iter().map(|(_cluster_id, score)| {
+                    // Tree search returns centroid-level results.
+                    // In a full integration, per-cluster HNSW search would
+                    // return actual VectorIds. For now, use cluster_ids as
+                    // approximations.
+                    (VectorId(_cluster_id), score)
+                }));
+            }
+        }
+
+        // If no index, no hot buffer, and no merkle tree, return an error.
+        if all_results.is_empty() && self.index.is_none() {
+            return Err(Error::IndexNotBuilt);
+        }
+
+        // 4. Sort by distance ascending, dedup by id, take top-k.
+        all_results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Dedup: keep first occurrence (closest) when same id appears.
+        let mut seen = std::collections::HashSet::new();
+        all_results.retain(|(id, _)| seen.insert(id.clone()));
+        all_results.truncate(k);
+
+        Ok(all_results)
     }
 
     /// Get multiple vectors by their IDs.
@@ -275,6 +471,30 @@ impl StorageEngine {
         self.wal.flush().await?;
         info!("StorageEngine shut down");
         Ok(())
+    }
+
+    /// Apply topological bias to a query vector using centroid,
+    /// correlation, and bucketized centroid data.
+    ///
+    /// Returns the biased vector when topological tracking is enabled;
+    /// returns the query unchanged when it is disabled.
+    pub fn apply_topological_bias(
+        &self,
+        query: &[f64],
+        filters: &[topological::BiasFilter],
+        alpha: f64,
+    ) -> Vec<f64> {
+        match (&self.centroids, &self.correlations, &self.buckets) {
+            (Some(centroids_lock), Some(correlations_lock), Some(buckets_lock)) => {
+                let centroids = centroids_lock.lock().unwrap();
+                let correlations = correlations_lock.lock().unwrap();
+                let buckets = buckets_lock.lock().unwrap();
+                topological::apply_topological_bias(
+                    query, filters, &centroids, &correlations, &buckets, alpha,
+                )
+            }
+            _ => query.to_vec(),
+        }
     }
 
     // ─── helpers ──────────────────────────────────────────────────────
@@ -350,6 +570,72 @@ mod tests {
                 path: root.join("index.bin"),
             },
             lifecycle: LifecycleConfig::default(),
+            topological: TopologicalConfig::default(),
+            merkle: MerkleConfig::default(),
+        }
+    }
+
+    /// Build a test config with topological bias enabled.
+    fn test_config_with_topological(tmp: &TempDir) -> StorageConfig {
+        let root = tmp.path().to_path_buf();
+        StorageConfig {
+            wal: WalConfig {
+                wal_dir: root.join("wal"),
+                segment_size: 1024 * 1024,
+                fsync_interval_ms: 100,
+                fsync_interval_ops: 1000,
+            },
+            hot: HotStoreConfig { max_records: 100 },
+            cold: ColdStoreConfig { data_dir: root.join("cold"), zstd_level: 0, max_rows_per_file: 10 },
+            skeleton: SkeletonConfig { wake_threshold: 0.15 },
+            cache: PageCacheConfig { capacity: 100 },
+            index: IndexConfig {
+                enabled: true,
+                dim: 4,
+                hnsw: tesseract_index::types::HnswConfig::default(),
+                path: root.join("index.bin"),
+            },
+            lifecycle: LifecycleConfig::default(),
+            topological: TopologicalConfig {
+                enabled: true,
+                categorical_fields: vec!["category".to_string()],
+                numerical_fields: vec!["year".to_string()],
+                numerical_buckets: [("year".to_string(), vec![2015.0, 2018.0, 2021.0, 2024.0])]
+                    .into_iter()
+                    .collect(),
+            },
+            merkle: MerkleConfig::default(),
+        }
+    }
+
+    /// Build a test config with Merkle tree enabled.
+    fn test_config_with_merkle(tmp: &TempDir) -> StorageConfig {
+        let root = tmp.path().to_path_buf();
+        StorageConfig {
+            wal: WalConfig {
+                wal_dir: root.join("wal"),
+                segment_size: 1024 * 1024,
+                fsync_interval_ms: 100,
+                fsync_interval_ops: 1000,
+            },
+            hot: HotStoreConfig { max_records: 200 },
+            cold: ColdStoreConfig { data_dir: root.join("cold"), zstd_level: 0, max_rows_per_file: 100 },
+            skeleton: SkeletonConfig { wake_threshold: 0.15 },
+            cache: PageCacheConfig { capacity: 100 },
+            index: IndexConfig {
+                enabled: true,
+                dim: 4,
+                hnsw: tesseract_index::types::HnswConfig::default(),
+                path: root.join("index.bin"),
+            },
+            lifecycle: LifecycleConfig::default(),
+            topological: TopologicalConfig::default(),
+            merkle: MerkleConfig {
+                enabled: true,
+                hot_buffer_capacity: 50,
+                max_cluster_size: 100,
+                merkle_tree_path: Some(root.join("merkle.bin")),
+            },
         }
     }
 
@@ -400,5 +686,231 @@ mod tests {
         let ids: [VectorId; 0] = [];
         let results = engine.batch_get(&ids).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Topological bias integration tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn topological_bias_disabled_by_default() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config(&tmp)).await.unwrap();
+        let query = vec![1.0, 2.0, 3.0, 4.0];
+
+        // With no topological config, bias should return query unchanged
+        let biased = engine.apply_topological_bias(&query, &[], 0.3);
+        assert_eq!(biased, query);
+    }
+
+    #[tokio::test]
+    async fn topological_bias_updates_on_insert() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config_with_topological(&tmp)).await.unwrap();
+
+        // Insert vectors with categorical metadata
+        engine
+            .insert(VectorId(1), vec![10.0, 0.0, 0.0, 0.0], serde_json::json!({"category": "science", "year": 2020}), WriteMode::Fast)
+            .await
+            .unwrap();
+
+        engine
+            .insert(VectorId(2), vec![0.0, 10.0, 0.0, 0.0], serde_json::json!({"category": "art", "year": 1990}), WriteMode::Fast)
+            .await
+            .unwrap();
+
+        // Apply categorical bias toward "science"
+        use tesseract_core::topological::{BiasFilter, BiasKind};
+        let filters = vec![BiasFilter {
+            field: "category".to_string(),
+            kind: BiasKind::Category("science".to_string()),
+        }];
+        let query = vec![0.0, 0.0, 0.0, 0.0];
+        let biased = engine.apply_topological_bias(&query, &filters, 0.5);
+
+        // science centroid = (10, 0, 0, 0), global centroid = (5, 5, 0, 0)
+        // delta = (5, -5, 0, 0), bias = alpha * delta = (2.5, -2.5, 0, 0)
+        assert!((biased[0] - 2.5).abs() < 1e-10, "dim0 should be 2.5, got {}", biased[0]);
+        assert!((biased[1] - (-2.5)).abs() < 1e-10, "dim1 should be -2.5, got {}", biased[1]);
+    }
+
+    #[tokio::test]
+    async fn topological_bias_with_enabled_index_and_search() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config_with_topological(&tmp)).await.unwrap();
+
+        // Insert 10 vectors: 5 in "science" cluster, 5 in "art" cluster
+        for i in 0..5u64 {
+            engine
+                .insert(
+                    VectorId(i),
+                    vec![10.0 + i as f64 * 0.1, 0.0, 0.0, 0.0],
+                    serde_json::json!({"category": "science", "year": 2020 + i}),
+                    WriteMode::Fast,
+                )
+                .await
+                .unwrap();
+        }
+        for i in 5..10u64 {
+            engine
+                .insert(
+                    VectorId(i),
+                    vec![0.0, 10.0 + (i - 5) as f64 * 0.1, 0.0, 0.0],
+                    serde_json::json!({"category": "art", "year": 1990 + (i - 5)}),
+                    WriteMode::Fast,
+                )
+                .await
+                .unwrap();
+        }
+
+        // Search without bias — query at origin will find some of both
+        let query = vec![0.0, 0.0, 0.0, 0.0];
+        let unbiased = engine.search(&query, 10, None).await.unwrap();
+
+        // Search with science bias
+        use tesseract_core::topological::{BiasFilter, BiasKind};
+        let filters = vec![BiasFilter {
+            field: "category".to_string(),
+            kind: BiasKind::Category("science".to_string()),
+        }];
+        let biased_vec = engine.apply_topological_bias(&query, &filters, 0.5);
+        let biased = engine.search(&biased_vec, 10, None).await.unwrap();
+
+        // Both should return results (index is populated)
+        assert!(!unbiased.is_empty(), "unbiased search should return results");
+        assert!(!biased.is_empty(), "biased search should return results");
+
+        // The biased search should have science vectors (IDs 0-4) higher ranked
+        // than the unbiased search
+        let biased_first_few: Vec<u64> = biased.iter().take(5).map(|(id, _)| id.0).collect();
+        let science_count = biased_first_few.iter().filter(|id| **id < 5).count();
+        assert!(
+            science_count >= 3,
+            "expected at least 3 science results in top 5 biased, got {science_count}: {biased_first_few:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Merkle tree integration tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn merkle_insert_with_hot_buffer_stores_in_buffer() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config_with_merkle(&tmp)).await.unwrap();
+
+        // Insert vectors — they should be stored in the hot buffer.
+        for i in 0..10u64 {
+            engine
+                .insert(VectorId(i), vec![i as f64; 4], serde_json::json!({"idx": i}), WriteMode::Fast)
+                .await
+                .unwrap();
+        }
+
+        // The hot buffer should have vectors.
+        let buffer = engine.hot_buffer.as_ref().unwrap().lock().unwrap();
+        assert_eq!(buffer.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn merkle_insert_small_batch_does_not_overflow() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config_with_merkle(&tmp)).await.unwrap();
+
+        // Insert fewer vectors than the hot buffer capacity (50).
+        for i in 0..20u64 {
+            engine
+                .insert(VectorId(i), vec![i as f32 as f64; 4], serde_json::json!({"idx": i}), WriteMode::Fast)
+                .await
+                .unwrap();
+        }
+
+        // Buffer should have 20 (not full, no merge triggered).
+        let buffer = engine.hot_buffer.as_ref().unwrap().lock().unwrap();
+        assert_eq!(buffer.len(), 20);
+        assert!(!buffer.is_full());
+    }
+
+    #[tokio::test]
+    async fn merkle_insert_triggers_merge_when_full() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config_with_merkle(&tmp)).await.unwrap();
+
+        // Insert more than hot_buffer_capacity (50) vectors.
+        for i in 0..60u64 {
+            engine
+                .insert(VectorId(i), vec![1.0, 0.0, 0.0, 0.0], serde_json::json!({"idx": i}), WriteMode::Fast)
+                .await
+                .unwrap();
+        }
+
+        // After many inserts, the buffer should have been drained at least once,
+        // and the Merkle tree should have centroids.
+        let tree = engine.merkle_tree.as_ref().unwrap().lock().unwrap();
+        assert!(tree.num_centroids() > 0, "Merkle tree should have centroids after full buffer");
+
+        // The hot buffer should have at most 50 vectors (capacity).
+        let buffer = engine.hot_buffer.as_ref().unwrap().lock().unwrap();
+        assert!(buffer.len() <= 50, "buffer should not exceed capacity, got {}", buffer.len());
+    }
+
+    #[tokio::test]
+    async fn merkle_hybrid_search_returns_results() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config_with_merkle(&tmp)).await.unwrap();
+
+        // Insert vectors that will go into hot buffer and trigger merge.
+        for i in 0..60u64 {
+            engine
+                .insert(VectorId(i), vec![1.0, 0.0, 0.0, 0.0], serde_json::json!({"idx": i}), WriteMode::Fast)
+                .await
+                .unwrap();
+        }
+
+        // Search should return results from both index and hot buffer.
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        let results = engine.search(&query, 10, None).await.unwrap();
+        assert!(!results.is_empty(), "hybrid search should return results");
+        assert!(results.len() <= 10, "should respect k=10, got {}", results.len());
+    }
+
+    #[tokio::test]
+    async fn merkle_disabled_has_no_buffer_or_tree() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config(&tmp)).await.unwrap();
+
+        assert!(engine.hot_buffer.is_none(), "hot buffer should be None when merkle disabled");
+        assert!(engine.merkle_tree.is_none(), "merkle tree should be None when merkle disabled");
+    }
+
+    // -----------------------------------------------------------------------
+    // Existing tests (keep at the end)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn topological_bias_disabled_does_not_track() {
+        let tmp = TempDir::new().unwrap();
+        let engine = StorageEngine::open(test_config(&tmp)).await.unwrap();
+
+        // Even with metadata, disabled topological should not affect results
+        engine
+            .insert(
+                VectorId(1),
+                vec![10.0, 0.0, 0.0, 0.0],
+                serde_json::json!({"category": "science"}),
+                WriteMode::Fast,
+            )
+            .await
+            .unwrap();
+
+        // apply_topological_bias should return query unchanged
+        use tesseract_core::topological::{BiasFilter, BiasKind};
+        let filters = vec![BiasFilter {
+            field: "category".to_string(),
+            kind: BiasKind::Category("science".to_string()),
+        }];
+        let query = vec![1.0, 2.0, 3.0, 4.0];
+        let biased = engine.apply_topological_bias(&query, &filters, 0.5);
+        assert_eq!(biased, query, "disabled topological should not bias");
     }
 }

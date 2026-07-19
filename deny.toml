@@ -9,3 +9,8 @@ allow = [
     "Unicode-DFS-2016",
     "CC0-1.0",
 ]
+
+# tesseract-pg extension dependencies
+[[licenses.private]]
+ignore = true
+description = "pgrx and its transitive deps — PG-licensed, distributed only as PG extension"

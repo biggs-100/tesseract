@@ -50,6 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             hnsw: Default::default(),
             path: std::path::PathBuf::from(&data_dir).join("index.hnsw"),
         },
+        topological: Default::default(),
+        merkle: Default::default(),
     };
 
     let storage = Arc::new(StorageEngine::open(storage_config).await?);
@@ -59,8 +61,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let planner_config = PlannerConfig::default();
     let executor = Arc::new(QueryExecutor::new(storage.clone(), embedder, episodic, planner_config));
 
-    let state = AppState { executor, storage };
+    let state = AppState { executor: executor.clone(), storage: storage.clone() };
     let router = http::build_router(state);
+
+    // Start the gRPC server in a background task when the `grpc` feature is enabled.
+    #[cfg(feature = "grpc")]
+    {
+        let grpc_addr = std::env::var("TESSERACT_GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:50051".into());
+        let grpc_executor = executor.clone();
+        let grpc_storage = storage.clone();
+        let grpc_addr_clone = grpc_addr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tesseract_api::grpc::serve_grpc(&grpc_addr_clone, grpc_executor, grpc_storage).await {
+                tracing::error!("gRPC server error: {e}");
+            }
+        });
+        tracing::info!("Tesseract gRPC listening on {}", grpc_addr);
+    }
 
     tracing::info!("Tesseract API listening on {}", listen_addr);
 

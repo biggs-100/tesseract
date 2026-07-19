@@ -11,6 +11,7 @@ members = [
     "tesseract-vql",
     "tesseract-api",
     "tesseract-cluster",
+    "tesseract-pg",
 ]
 
 [workspace.package]

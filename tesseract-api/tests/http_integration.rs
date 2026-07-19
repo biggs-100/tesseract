@@ -51,6 +51,8 @@ fn test_storage_config(tmp: &tempfile::TempDir) -> StorageConfig {
         cache: PageCacheConfig { capacity: 100 },
         index: IndexConfig { enabled: true, dim: 4, hnsw: Default::default(), path: root.join("index.bin") },
         lifecycle: LifecycleConfig::default(),
+        topological: Default::default(),
+        merkle: Default::default(),
     }
 }
 
@@ -61,6 +63,8 @@ fn planner_config() -> PlannerConfig {
         estimated_vector_count: 100,
         cost_buffer: 0.0,
         cost_per_distance_ms: 0.000_001,
+        topological_alpha: 0.3,
+        merkle_enabled: false,
     }
 }
 
