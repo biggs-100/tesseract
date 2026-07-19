@@ -16,8 +16,12 @@ nom = "7"
 nom_locate = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
 tempfile = "3"
 tesseract-index = { path = "../tesseract-index" }
+
+[[bin]]
+name = "vql"
+path = "src/repl.rs"
