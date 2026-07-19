@@ -5,6 +5,7 @@ pub mod distance;
 pub mod embedding;
 pub mod episodic;
 pub mod projection;
+pub mod topological;
 pub mod types;
 
 pub use tesseract_common::error::{Error, Result};
