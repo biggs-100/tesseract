@@ -8,4 +8,4 @@ pub mod parser;
 pub mod planner;
 
 pub use executor::*;
-pub use planner::*;
+pub use planner::{PlanNode, PlannerConfig, QueryPlanner};
