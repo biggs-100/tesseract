@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+syntax = "proto3";
+package tesseract;
+
+service TesseractQuery {
+    rpc Query (QueryRequest) returns (stream ScoredRecord);
+    rpc Insert (InsertRequest) returns (InsertResponse);
+    rpc Health (HealthRequest) returns (HealthResponse);
+}
+
+message QueryRequest {
+    string vql = 1;
+}
+
+message ScoredRecord {
+    uint64 id = 1;
+    float score = 2;
+    string metadata = 3; // JSON string
+}
+
+message InsertRequest {
+    uint64 id = 1;
+    repeated float vector = 2;
+    optional string metadata = 3;
+}
+
+message InsertResponse {
+    uint64 id = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+    string status = 1;
+}
