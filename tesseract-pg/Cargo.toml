@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Tesseract Contributors
+
+[package]
+name = "tesseract-pg"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.85"
+description = "PostgreSQL extension (pgrx) proxying vector/semantic queries to Tesseract"
+
+[lib]
+name = "tesseract_fdw"
+crate-type = ["cdylib"]
+
+[dependencies]
+pgrx = { version = "0.12", optional = true }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[features]
+default = ["pg16"]
+pg16 = ["pg_extension", "pgrx/pg16"]
+pg17 = ["pg_extension", "pgrx/pg17"]
+pg_extension = ["dep:pgrx"]
