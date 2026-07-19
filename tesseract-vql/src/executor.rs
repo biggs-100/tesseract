@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Tesseract Contributors
 
 //! Query executor — wires parsing, planning, embedding, episodic memory,
-//! and HNSW search into a single end-to-end pipeline.
+//! and HNSW search into a single end-to-end pipeline using the algebra-based
+//! `PlanNode` tree.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tesseract_common::error::Result;
@@ -11,8 +14,9 @@ use tesseract_core::embedding::EmbeddingService;
 use tesseract_core::episodic::EpisodicMemory;
 use tesseract_storage::engine::StorageEngine;
 
+use crate::ast::*;
 use crate::parser;
-use crate::planner::{FindClause, PlannerConfig, QueryPlanner};
+use crate::planner::{PlanNode, PlannerConfig, QueryPlanner};
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -49,6 +53,17 @@ pub struct QueryResult {
 // ---------------------------------------------------------------------------
 
 /// The query executor connects parsing, planning, embedding, and search.
+///
+/// Execution walks the algebra-based `PlanNode` tree recursively:
+///
+/// | Node        | Execution                          |
+/// |-------------|------------------------------------|
+/// | `AnnScan`   | Embed text (if needed) → HNSW search |
+/// | `Filter`    | Evaluate predicate → post-filter    |
+/// | `Bias`      | Apply scoring function re-ranking   |
+/// | `Sort`      | Sort by scoring function            |
+/// | `Limit`     | Skip + take pagination             |
+/// | `Deadline`  | Enforce latency budget             |
 pub struct QueryExecutor {
     planner: QueryPlanner,
     storage: Arc<StorageEngine>,
@@ -70,12 +85,9 @@ impl QueryExecutor {
     ///
     /// The pipeline is:
     /// 1. Parse VQL → AST
-    /// 2. Plan AST → QueryPlan
+    /// 2. Plan AST → PlanNode tree
     /// 3. Resolve query vector (embed text or use pre-computed)
-    /// 4. Apply episodic memory footprint (if user_id provided)
-    /// 5. Search via StorageEngine (HNSW with optional WeightMask)
-    /// 6. Enforce WITHIN deadline (truncate if budget exceeded)
-    /// 7. Format scored results
+    /// 4. Walk the `PlanNode` tree recursively
     pub async fn execute(&self, vql: &str, user_id: Option<&str>) -> Result<QueryResult> {
         let t0 = std::time::Instant::now();
 
@@ -83,67 +95,17 @@ impl QueryExecutor {
         let parsed = parser::parse(vql)?;
         let t1 = std::time::Instant::now();
 
-        // 2. Plan
-        let plan = self.planner.plan(&parsed)?;
+        // 2. Plan → PlanNode tree
+        let plan = self.planner.plan_to_tree(&parsed)?;
         let t2 = std::time::Instant::now();
 
-        // 3. Resolve query vector
-        let query_vector = match &plan.find {
-            FindClause::Vector { field: _, vector } => vector.clone(),
-            FindClause::Text { field: _, text, model } => self.embedder.embed(text, model).await?,
-        };
+        // 3. Resolve query vector from the AST
+        let query_vector = self.resolve_query_vector(&parsed).await?;
         let t3 = std::time::Instant::now();
 
-        // 4. Apply episodic memory footprint (if user_id provided)
-        //
-        // Element-wise multiplies the query vector by the user's footprint
-        // to bias results toward the user's implicit preferences.
-        let search_vector: Vec<f64> = if let Some(uid) = user_id {
-            if let Some(footprint) = self.episodic.get_footprint(uid) {
-                EpisodicMemory::apply_footprint(&query_vector, &footprint)
-            } else {
-                // No footprint yet for this user — use raw query vector.
-                query_vector
-            }
-        } else {
-            query_vector
-        };
-        let before_search = std::time::Instant::now();
-
-        // 5. Search via StorageEngine (HNSW + optional WeightMask filter)
-        let raw_results = self.storage.search(&search_vector, plan.ef_search, plan.weight_mask.as_ref()).await?;
-        let t5 = std::time::Instant::now();
-
-        // 6. WITHIN deadline enforcement
-        //
-        // If a latency budget was specified and the total elapsed time
-        // exceeds it, truncate the remaining candidates. For the current
-        // atomic HNSW search this reduces the effective limit. A future
-        // progressive-search implementation would use this to stop
-        // mid-search.
-        let total_elapsed_ms = duration_ms(t5 - t0);
-        let effective_limit = if let Some(budget_ms) = plan.within_ms {
-            if total_elapsed_ms > budget_ms as f64 {
-                // Budget exceeded: scale back the limit proportionally
-                // so that slower queries return fewer results.
-                let ratio = (budget_ms as f64 / total_elapsed_ms).min(1.0);
-                (plan.limit as f64 * ratio).ceil() as usize
-            } else {
-                plan.limit
-            }
-        } else {
-            plan.limit
-        };
-
-        // 7. Format results
-        //
-        // Metadata fetch is deferred — see `batch_get()` on StorageEngine.
-        // A follow-up will add N+1-mitigated batch metadata loading.
-        let results: Vec<ScoredResult> = raw_results
-            .into_iter()
-            .take(effective_limit)
-            .map(|(id, score)| ScoredResult { id: id.0, score, metadata: None })
-            .collect();
+        // 4. Execute the PlanNode tree
+        let results = self.execute_plan(&plan, &query_vector, user_id).await?;
+        let t4 = std::time::Instant::now();
 
         Ok(QueryResult {
             total: results.len(),
@@ -152,16 +114,343 @@ impl QueryExecutor {
                 parse_ms: duration_ms(t1 - t0),
                 plan_ms: duration_ms(t2 - t1),
                 embed_ms: duration_ms(t3 - t2),
-                search_ms: duration_ms(t5 - before_search),
-                total_ms: total_elapsed_ms,
+                search_ms: duration_ms(t4 - t3),
+                total_ms: duration_ms(t4 - t0),
             },
         })
     }
+
+    // -----------------------------------------------------------------------
+    // Query vector resolution
+    // -----------------------------------------------------------------------
+
+    /// Resolve the query vector from the AST — embed text or use pre-computed vector.
+    async fn resolve_query_vector(&self, query: &Query) -> Result<Vec<f64>> {
+        match &query.similarity {
+            Some(expr) => {
+                if let Some(vector) = &expr.vector {
+                    Ok(vector.clone())
+                } else {
+                    self.embedder.embed(&expr.query_text, "text-embedding-3-small").await
+                }
+            }
+            None => Err(tesseract_common::error::Error::ServiceError("No similarity clause".into())),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PlanNode tree execution
+    // -----------------------------------------------------------------------
+
+    /// Execute a `PlanNode` tree recursively.
+    ///
+    /// Returns a boxed future because Rust cannot determine the size of
+    /// a recursive async fn at compile time.
+    fn execute_plan<'a>(
+        &'a self,
+        plan: &'a PlanNode,
+        query_vector: &'a [f64],
+        user_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ScoredResult>>> + Send + 'a>> {
+        Box::pin(async move {
+            match plan {
+                // ── Merge (⨝⨝⨝) — Hybrid hot/cold merge ──────────────
+                PlanNode::Merge { left, right, limit } => {
+                    // Execute both branches in parallel.
+                    let left_fut = self.execute_plan(left, query_vector, user_id);
+                    let right_fut = self.execute_plan(right, query_vector, user_id);
+                    let (left_results, right_results) = tokio::join!(left_fut, right_fut);
+
+                    let mut all = left_results?;
+                    all.extend(right_results?);
+
+                    // Sort by score descending, dedup by id, truncate.
+                    all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                    all.dedup_by(|a, b| a.id == b.id);
+                    all.truncate(*limit);
+                    Ok(all)
+                }
+
+                // ── AnnScan (⨝⨝) — ANN/HNSW search ────────────────────
+                PlanNode::AnnScan { field: _, ef_search, weight_mask, bias_filters, topological_alpha } => {
+                    // Apply episodic footprint if user context is available
+                    // (backward-compatible: always applied when user_id is provided)
+                    let search_vector = if let Some(uid) = user_id {
+                        if let Some(footprint) = self.episodic.get_footprint(uid) {
+                            EpisodicMemory::apply_footprint(query_vector, &footprint)
+                        } else {
+                            query_vector.to_vec()
+                        }
+                    } else {
+                        query_vector.to_vec()
+                    };
+
+                    // Apply topological bias (query-time vector shifting toward
+                    // the metadata filter region) so HNSW naturally finds results
+                    // that match the filter, without post-filtering.
+                    let biased_vector = if !bias_filters.is_empty() {
+                        self.storage.apply_topological_bias(&search_vector, bias_filters, *topological_alpha)
+                    } else {
+                        search_vector
+                    };
+
+                    // Execute HNSW search via StorageEngine
+                    let raw = self
+                        .storage
+                        .search(&biased_vector, *ef_search, weight_mask.as_ref())
+                        .await?;
+
+                    Ok(raw
+                        .into_iter()
+                        .map(|(id, score)| ScoredResult { id: id.0, score, metadata: None })
+                        .collect())
+                }
+
+                // ── Filter (σ) — Metadata post-filter ──────────────────
+                PlanNode::Filter { input, predicate } => {
+                    let results = self.execute_plan(input, query_vector, user_id).await?;
+                    Ok(results
+                        .into_iter()
+                        .filter(|r| self.evaluate_predicate(predicate, r))
+                        .collect())
+                }
+
+                // ── Bias (φ) — Scoring-function re-ranking ─────────────
+                PlanNode::Bias { input, scoring_fn, args } => {
+                    if scoring_fn == "personal" {
+                        // Personal bias modifies the query vector pre-search.
+                        // Apply footprint and delegate to child with biased vector.
+                        let biased_vector = if let Some(uid) = user_id {
+                            if let Some(footprint) = self.episodic.get_footprint(uid) {
+                                EpisodicMemory::apply_footprint(query_vector, &footprint)
+                            } else {
+                                query_vector.to_vec()
+                            }
+                        } else {
+                            query_vector.to_vec()
+                        };
+                        return self.execute_plan(input, &biased_vector, user_id).await;
+                    }
+                    // Post-search bias: execute child, then re-rank
+                    let results = self.execute_plan(input, query_vector, user_id).await?;
+                    self.apply_bias(results, scoring_fn, args)
+                }
+
+                // ── Sort (τ) — Explicit ordering ───────────────────────
+                PlanNode::Sort { input, scoring_fn, args, descending } => {
+                    let mut results = self.execute_plan(input, query_vector, user_id).await?;
+                    self.sort_results(&mut results, scoring_fn, args, *descending);
+                    Ok(results)
+                }
+
+                // ── Limit (λ) — Pagination ─────────────────────────────
+                PlanNode::Limit { input, limit, offset } => {
+                    let results = self.execute_plan(input, query_vector, user_id).await?;
+                    Ok(results.into_iter().skip(*offset).take(*limit).collect())
+                }
+
+                // ── Deadline (⏱) — Latency enforcement ─────────────────
+                PlanNode::Deadline { input, millis, estimated_cost_ms: _ } => {
+                    let t0 = std::time::Instant::now();
+                    let results = self.execute_plan(input, query_vector, user_id).await?;
+                    let elapsed_ms = duration_ms(t0.elapsed());
+
+                    if elapsed_ms > *millis as f64 {
+                        // Budget exceeded: scale back results proportionally
+                        let ratio = (*millis as f64 / elapsed_ms).min(1.0);
+                        let keep = (results.len() as f64 * ratio).ceil() as usize;
+                        Ok(results.into_iter().take(keep).collect())
+                    } else {
+                        Ok(results)
+                    }
+                }
+            }
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Predicate evaluation (for Filter node)
+    // -----------------------------------------------------------------------
+
+    /// Evaluate a predicate against a scored result's metadata.
+    fn evaluate_predicate(&self, predicate: &Predicate, result: &ScoredResult) -> bool {
+        match predicate {
+            Predicate::Comparison { field, operator, value } => {
+                let field_val = self.extract_field_value(result, field);
+                match field_val {
+                    Some(actual) => self.compare_literals(operator, &actual, value),
+                    None => false,
+                }
+            }
+            Predicate::In { field, values } => {
+                let field_val = self.extract_field_value(result, field);
+                match field_val {
+                    Some(actual) => values.iter().any(|v| self.values_equal(&actual, v)),
+                    None => false,
+                }
+            }
+            Predicate::Between { field, low, high } => {
+                let field_val = self.extract_field_value(result, field);
+                match field_val {
+                    Some(actual) => {
+                        self.compare_literals(&ComparisonOp::Gte, &actual, low)
+                            && self.compare_literals(&ComparisonOp::Lte, &actual, high)
+                    }
+                    None => false,
+                }
+            }
+            Predicate::Like { field, pattern } => {
+                let field_val = self.extract_field_value(result, field);
+                match field_val {
+                    Some(Literal::String(s)) => like_match(&s, pattern),
+                    _ => false,
+                }
+            }
+            Predicate::And(predicates) => predicates.iter().all(|p| self.evaluate_predicate(p, result)),
+        }
+    }
+
+    /// Extract a field value from a ScoredResult's metadata as a Literal.
+    fn extract_field_value(&self, result: &ScoredResult, field: &str) -> Option<Literal> {
+        let metadata = result.metadata.as_ref()?;
+        let value = metadata.get(field)?;
+        Some(json_value_to_literal(value))
+    }
+
+    /// Compare two literals using the given operator.
+    fn compare_literals(&self, operator: &ComparisonOp, a: &Literal, b: &Literal) -> bool {
+        use std::cmp::Ordering;
+        let ordering = match (coerce_numeric(a), coerce_numeric(b)) {
+            (Some(la), Some(lb)) => Some(la.partial_cmp(&lb).unwrap_or(Ordering::Equal)),
+            _ => return false,
+        };
+        match operator {
+            ComparisonOp::Eq => ordering == Some(Ordering::Equal),
+            ComparisonOp::Neq => ordering != Some(Ordering::Equal),
+            ComparisonOp::Lt => ordering == Some(Ordering::Less),
+            ComparisonOp::Gt => ordering == Some(Ordering::Greater),
+            ComparisonOp::Lte => ordering != Some(Ordering::Greater),
+            ComparisonOp::Gte => ordering != Some(Ordering::Less),
+        }
+    }
+
+    /// Check if two literals have equal values (for IN predicate).
+    fn values_equal(&self, a: &Literal, b: &Literal) -> bool {
+        match (coerce_numeric(a), coerce_numeric(b)) {
+            (Some(la), Some(lb)) => (la - lb).abs() < f64::EPSILON,
+            _ => {
+                // Fall back to string comparison
+                format!("{a:?}") == format!("{b:?}")
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bias / Sort scoring functions
+    // -----------------------------------------------------------------------
+
+    /// Apply a post-search bias scoring function to re-rank results.
+    fn apply_bias(&self, results: Vec<ScoredResult>, scoring_fn: &str, _args: &[String]) -> Result<Vec<ScoredResult>> {
+        match scoring_fn {
+            "recency" | "popularity" | "relevance_clicks" => {
+                // Placeholder: these bias functions would look up external data
+                // (timestamps, click counts, user history) and adjust scores.
+                // For Phase 3, return results unchanged.
+                Ok(results)
+            }
+            _ => Err(tesseract_common::error::Error::ServiceError(format!(
+                "Unknown bias scoring function: {scoring_fn}"
+            ))),
+        }
+    }
+
+    /// Sort results by a scoring function.
+    fn sort_results(
+        &self,
+        results: &mut [ScoredResult],
+        scoring_fn: &str,
+        _args: &[String],
+        descending: bool,
+    ) {
+        match scoring_fn {
+            "score" | "similarity" => {
+                results.sort_by(|a, b| {
+                    if descending {
+                        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                });
+            }
+            _ => {
+                // Unknown scoring function: sort by score descending as fallback
+                results.sort_by(|a, b| {
+                    b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
 
 /// Convert a [`std::time::Duration`] to milliseconds as an f64.
 fn duration_ms(d: std::time::Duration) -> f64 {
     d.as_secs_f64() * 1000.0
+}
+
+/// Convert a `serde_json::Value` to a `Literal` for predicate evaluation.
+fn json_value_to_literal(v: &serde_json::Value) -> Literal {
+    match v {
+        serde_json::Value::String(s) => Literal::String(s.clone()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Literal::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                Literal::Float(f)
+            } else {
+                Literal::Null
+            }
+        }
+        serde_json::Value::Bool(b) => Literal::Boolean(*b),
+        serde_json::Value::Null => Literal::Null,
+        _ => Literal::Null,
+    }
+}
+
+/// Coerce a `Literal` to an `f64` for numeric comparison.
+/// Returns `None` if the literal is not numeric-comparable.
+fn coerce_numeric(lit: &Literal) -> Option<f64> {
+    match lit {
+        Literal::Integer(i) => Some(*i as f64),
+        Literal::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Simple LIKE pattern matching with `%` as multi-character wildcard.
+/// Does NOT support `_` (single-char wildcard) as per VQL v1 spec.
+fn like_match(value: &str, pattern: &str) -> bool {
+    if pattern == "%" {
+        return true;
+    }
+
+    let inner = pattern.strip_prefix('%').and_then(|s| s.strip_suffix('%'));
+    if let Some(middle) = inner {
+        if !middle.is_empty() {
+            return value.contains(middle);
+        }
+    }
+
+    if let Some(suffix) = pattern.strip_prefix('%') {
+        value.ends_with(suffix)
+    } else if let Some(prefix) = pattern.strip_suffix('%') {
+        value.starts_with(prefix)
+    } else {
+        value == pattern
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +488,8 @@ mod tests {
                 path: root.join("index.bin"),
             },
             lifecycle: LifecycleConfig::default(),
+            topological: TopologicalConfig::default(),
+            merkle: tesseract_storage::types::MerkleConfig::default(),
         }
     }
 
@@ -208,8 +499,10 @@ mod tests {
             default_ef_search: 50,
             dim: 4,
             estimated_vector_count: 100,
-            cost_buffer: 0.0, // no buffer for tests
+            cost_buffer: 0.0,
             cost_per_distance_ms: 0.000_001,
+            topological_alpha: 0.3,
+            merkle_enabled: false,
         }
     }
 
@@ -245,11 +538,6 @@ mod tests {
 
         let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
 
-        // Execute a text query — NoopEmbedding will error, but we use
-        // a VQL query that would normally go through embed.
-        // For this test we need a way to query with raw vectors.
-        // Since the planner only produces Text, we need to handle the
-        // NoopEmbedding error, OR we modify how we test.
         let result = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 10", None).await;
         assert!(result.is_err(), "NoopEmbedding should produce an embed error");
         let err = result.unwrap_err();
@@ -257,9 +545,6 @@ mod tests {
     }
 
     /// Test with a query vector by going through the planner directly.
-    /// We can't easily inject a pre-computed vector through VQL parsing
-    /// (the parser only produces Text), so we bypass the executor for
-    /// direct vector tests and verify the storage search works.
     #[tokio::test]
     async fn e2e_storage_search_works_with_enabled_index() {
         let tmp = TempDir::new().unwrap();
@@ -312,12 +597,7 @@ mod tests {
         let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
         let result = executor.execute("FIND SIMILARITY(emb, 'should error')", None).await;
 
-        // NoopEmbedding errors — but we can still verify timing by
-        // checking that the error type matches.
         assert!(result.is_err());
-
-        // For a real timing test, insert a pre-computed vector test via
-        // storage search (already tested above).
     }
 
     #[tokio::test]
@@ -328,7 +608,6 @@ mod tests {
         let episodic = Arc::new(EpisodicMemory::new());
 
         let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
-        // This will error at embed step, but parse+plan timings should exist.
         let err = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 5", None).await.unwrap_err();
         assert!(!err.to_string().is_empty());
     }
@@ -342,7 +621,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let engine = Arc::new(StorageEngine::open(test_storage_config(&tmp)).await.unwrap());
 
-        // No vectors inserted — index exists but is empty.
         let query = vec![0.0_f64; 4];
         let results = engine.search(&query, 10, None).await.unwrap();
         assert!(results.is_empty(), "empty index should return no results");
@@ -390,10 +668,6 @@ mod tests {
         let footprint = fp.unwrap();
         let biased = EpisodicMemory::apply_footprint(&raw_query, &footprint);
         assert_eq!(biased.len(), 4);
-        // Element-wise multiplication: query[i] * footprint[i]
-        // Footprint was created from clicked=[1,1,1,1] with bias from clicked*query=[0.5,...]
-        // result = 0.7 * [1,1,1,1] + 0.3 * [0.5,0.5,0.5,0.5] = [0.85, 0.85, 0.85, 0.85]
-        // apply_footprint: [1,2,3,4] * [0.85,...] = [0.85, 1.7, 2.55, 3.4]
         assert!((biased[0] - 0.85).abs() < 1e-10);
         assert!((biased[1] - 1.7).abs() < 1e-10);
 
@@ -401,8 +675,6 @@ mod tests {
         insert_vectors(&engine, 10, 4, 0.0).await;
 
         let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
-        // This will fail at embed step (NoopEmbedding), but we can verify
-        // that the episodic memory is wired by checking the error type.
         let result = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 5", Some("alice")).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -420,7 +692,6 @@ mod tests {
         assert!(episodic.get_footprint("bob").is_none());
 
         let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
-        // The executor should not crash when user has no footprint.
         let result = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 5", Some("bob")).await;
         assert!(result.is_err(), "should still fail at embed, not at footprint");
     }
@@ -433,7 +704,6 @@ mod tests {
     fn timings_are_properly_structured() {
         let timings = QueryTimings { parse_ms: 0.1, plan_ms: 0.2, embed_ms: 0.3, search_ms: 0.5, total_ms: 1.1 };
 
-        // total >= sum of parts (there's some overhead)
         let sum_parts = timings.parse_ms + timings.plan_ms + timings.embed_ms + timings.search_ms;
         assert!(
             (timings.total_ms - sum_parts).abs() < f64::EPSILON,
@@ -442,7 +712,6 @@ mod tests {
             sum_parts
         );
 
-        // All timings are non-negative
         assert!(timings.parse_ms >= 0.0);
         assert!(timings.plan_ms >= 0.0);
         assert!(timings.embed_ms >= 0.0);
@@ -475,5 +744,41 @@ mod tests {
         let json = serde_json::to_string(&qr).unwrap();
         assert!(json.contains("\"total\":2"));
         assert!(json.contains("\"timings\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: like_match tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn like_match_exact() {
+        assert!(like_match("hello", "hello"));
+        assert!(!like_match("hello", "world"));
+    }
+
+    #[test]
+    fn like_match_prefix() {
+        assert!(like_match("italian", "ita%"));
+        assert!(like_match("italian-fusion", "ita%"));
+        assert!(!like_match("french", "ita%"));
+    }
+
+    #[test]
+    fn like_match_suffix() {
+        assert!(like_match("hello", "%lo"));
+        assert!(!like_match("hello", "%la"));
+    }
+
+    #[test]
+    fn like_match_contains() {
+        assert!(like_match("hello world", "%llo wo%"));
+        assert!(like_match("hello world", "%o w%"));
+        assert!(!like_match("hello world", "%xyz%"));
+    }
+
+    #[test]
+    fn like_match_wildcard_only() {
+        assert!(like_match("anything", "%"));
+        assert!(like_match("", "%"));
     }
 }
