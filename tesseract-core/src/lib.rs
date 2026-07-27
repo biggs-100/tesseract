@@ -8,4 +8,7 @@ pub mod projection;
 pub mod topological;
 pub mod types;
 
+#[cfg(feature = "test-embedding")]
+pub mod test_embedding;
+
 pub use tesseract_common::error::{Error, Result};
