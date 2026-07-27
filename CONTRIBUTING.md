@@ -121,6 +121,7 @@ cargo fmt --check
 ```bash
 cargo install cargo-deny --locked
 cargo deny check licenses
+cargo deny check advisories
 ```
 
 ---

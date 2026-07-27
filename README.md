@@ -3,6 +3,8 @@
 [![CI](https://github.com/tesseract-db/tesseract/actions/workflows/ci.yml/badge.svg)](https://github.com/tesseract-db/tesseract/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Audit](https://github.com/tesseract-db/tesseract/actions/workflows/ci.yml/badge.svg?job=audit)](https://github.com/tesseract-db/tesseract/actions/workflows/ci.yml)
+[![Audit](https://github.com/tesseract-db/tesseract/actions/workflows/ci.yml/badge.svg)](https://github.com/tesseract-db/tesseract/actions/workflows/ci.yml)
 
 > **A semantic-relational database engine that unifies structured and unstructured data.**
 >
@@ -97,13 +99,13 @@ FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3, 0.4))
 
 Instead of post-filtering, metadata filters become a **geometric constraint** on the query vector. At search time, the query is shifted toward the region that matches the filter — using centroid deltas computed incrementally, with zero training.
 
-**Benchmark results** (1M vectors, 128d):
+**Benchmark results** (1M vectors, 128d, adaptive α ∈ [0.2, 0.7]):
 
-| Filter type | Without bias | With bias | Improvement |
+| Filter type | Without bias | With bias (adaptive) | Improvement |
 |---|---|---|---|
-| Category (`category = 'science'`) | 0.60 recall@10 | **0.79** | **+32%** |
-| Year range (`year >= 2020`) | 0.33 | **0.70** | **+110%** |
-| Combined (category + year) | 0.23 | **0.85** | **+278%** |
+| Category (`category = 'science'`) | 0.60 recall@10 | **0.71 recall@10** | **+18%** |
+| Year range (`year >= 2020`) | 0.07 | **0.28** | **+307%** |
+| Combined (category + year) | 0.02 | **0.31** | **+1437%** |
 | No filter | 1.00 | 1.00 | **0% (no regression)** |
 
 The bias is:
@@ -165,6 +167,9 @@ curl -X POST http://localhost:3000/insert \
 curl -X POST http://localhost:3000/query \
   -H "Content-Type: application/json" \
   -d '{"vql": "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3)) LIMIT 5"}'
+
+# Health check
+curl http://localhost:3000/health/liveness
 ```
 
 ### Docker Compose
@@ -173,6 +178,53 @@ curl -X POST http://localhost:3000/query \
 docker compose up -d
 # Tesseract on :8081, PostgreSQL 16 on :5432
 ```
+
+---
+
+### Authentication
+
+Tesseract supports three authentication modes, configured via `TESSERACT_AUTH_MODE`:
+
+- **`none`** (default) — All requests are accepted. Use for development and evaluation.
+- **`api-key`** — Requests must include an `X-API-Key` header with a valid key.
+  Keys are configured via `TESSERACT_API_KEYS` in `key:role,key:role` format.
+- **`jwt`** — Requests must include an `Authorization: Bearer <token>` header.
+  Tokens are verified using HMAC HS256 with the secret from `TESSERACT_JWT_SECRET`.
+- **`both`** — Both authentication methods are accepted. The server tries API key first,
+  then JWT.
+
+Health endpoints (`/health/*`) and metrics (`/metrics`) are always public regardless
+of the authentication mode.
+
+```bash
+# Start with API key auth
+TESSERACT_AUTH_MODE=api-key TESSERACT_API_KEYS="sk-abc123:admin,sk-def456:reader" cargo run -p tesseract-api
+
+# Query with the key
+curl -H "X-API-Key: sk-abc123" http://localhost:3000/query -d '{"vql": "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3)) LIMIT 5"}'
+```
+
+### Observability
+
+Tesseract exposes health checks, Prometheus metrics, and structured logging.
+
+**Health endpoints:**
+
+| Endpoint | Description |
+|---|---|
+| `GET /health/liveness` | Returns `200 {"status": "pass"}` when the process is alive |
+| `GET /health/readiness` | Returns `200` with component status (WAL, index, HotBuffer) |
+
+**Metrics** (with `--features otel`):
+
+| Endpoint | Description |
+|---|---|
+| `GET /metrics` | Prometheus-format metrics (queries, inserts, latency, index size) |
+
+**Structured logging:**
+
+Set `TESSERACT_LOG_FORMAT=json` for JSON-formatted log output, suitable
+for ingestion by log aggregators.
 
 ---
 
@@ -206,15 +258,15 @@ docker compose up -d
 ## Benchmarks
 
 | Benchmark | Metric | Result |
-|---|---|---|
-| Topological Index (category) | recall@10 | 0.79 (+32% vs post-filter) |
-| Topological Index (year range) | recall@10 | 0.70 (+110% vs post-filter) |
-| Topological Index (combined) | recall@10 | 0.85 (+278% vs post-filter) |
-| Merkle Tree insert | throughput | 2.7M vectors/sec |
-| Merkle Tree merge | latency | 97 ms / 10k batch |
+|---|---|---|---|
+| Topological Index (category) | recall@10 | 0.71 (+18% vs baseline) |
+| Topological Index (year range) | recall@10 | 0.28 (+307% vs baseline) |
+| Topological Index (combined) | recall@10 | 0.31 (+1437% vs baseline) |
+| Merkle Tree insert | throughput | 1.8M vectors/sec |
+| Merkle Tree merge | latency | 135 ms / 10k batch |
 | Merkle freshness | recall@10 | 100% |
 | HNSW recall (baseline) | recall@10 | 0.95 @ ef=200 |
-| Workspace tests | count | 482, 0 failures |
+| Workspace tests | count | 511, 0 failures |
 
 ---
 
@@ -222,10 +274,19 @@ docker compose up -d
 
 | Variable | Default | Description |
 |---|---|---|
-| `TESSERACT_DATA_DIR` | `./data` | Persistent storage |
+| `TESSERACT_DATA_DIR` | `./data` | Persistent storage path |
 | `TESSERACT_LISTEN_ADDR` | `0.0.0.0:3000` | HTTP bind address |
 | `TESSERACT_GRPC_ADDR` | `0.0.0.0:50051` | gRPC bind address (with `--features grpc`) |
-| `RUST_LOG` | `info` | Logging level |
+| `TESSERACT_AUTH_MODE` | `none` | Authentication mode: `none`, `api-key`, `jwt`, or `both` |
+| `TESSERACT_API_KEYS` | — | Comma-separated `key:role` pairs for API key auth |
+| `TESSERACT_JWT_SECRET` | `dev-secret-do-not-use-in-prod` | HMAC secret for JWT verification (HS256) |
+| `TESSERACT_RATE_LIMIT_RPM` | `100` | Max requests per minute per IP |
+| `TESSERACT_QUERY_TIMEOUT_SECS` | `30` | Default timeout for queries without explicit `WITHIN` |
+| `TESSERACT_SHUTDOWN_TIMEOUT_SECS` | `30` | Max time to drain buffers and flush WAL on shutdown |
+| `TESSERACT_EMBEDDING_TIMEOUT_SECS` | `30` | Per-request timeout for embedding API calls |
+| `TESSERACT_EMBEDDING_RETRY_MAX` | `3` | Max retries on embedding API rate limits (429) or server errors (5xx) |
+| `TESSERACT_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
+| `RUST_LOG` | `info` | Logging level (e.g. `debug`, `trace`, `warn`) |
 
 ---
 
