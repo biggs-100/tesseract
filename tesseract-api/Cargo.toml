@@ -26,6 +26,9 @@ tesseract-storage = { path = "../tesseract-storage" }
 tesseract-core = { path = "../tesseract-core" }
 tesseract-common = { path = "../tesseract-common" }
 
+# Auth
+jsonwebtoken = "9"
+
 # gRPC dependencies (optional, enabled via `--features grpc`)
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
