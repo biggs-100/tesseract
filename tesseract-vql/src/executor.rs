@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tesseract_common::error::Result;
 use tesseract_core::embedding::EmbeddingService;
@@ -69,6 +70,8 @@ pub struct QueryExecutor {
     storage: Arc<StorageEngine>,
     embedder: Arc<dyn EmbeddingService>,
     episodic: Arc<EpisodicMemory>,
+    /// Implicit timeout for queries without a `WITHIN` clause.
+    query_timeout: Duration,
 }
 
 impl QueryExecutor {
@@ -77,8 +80,15 @@ impl QueryExecutor {
         embedder: Arc<dyn EmbeddingService>,
         episodic: Arc<EpisodicMemory>,
         config: PlannerConfig,
+        query_timeout: Duration,
     ) -> Self {
-        Self { planner: QueryPlanner::new(config), storage, embedder, episodic }
+        Self {
+            planner: QueryPlanner::new(config),
+            storage,
+            embedder,
+            episodic,
+            query_timeout,
+        }
     }
 
     /// Execute a VQL query string end-to-end.
@@ -91,33 +101,45 @@ impl QueryExecutor {
     pub async fn execute(&self, vql: &str, user_id: Option<&str>) -> Result<QueryResult> {
         let t0 = std::time::Instant::now();
 
-        // 1. Parse
-        let parsed = parser::parse(vql)?;
-        let t1 = std::time::Instant::now();
+        // Wrap the entire execution in an implicit timeout.
+        // Queries with a `WITHIN` clause are additionally bounded by their
+        // own deadline; this is a safety net for queries without one.
+        let inner = async {
+            // 1. Parse
+            let parsed = parser::parse(vql)?;
+            let t1 = std::time::Instant::now();
 
-        // 2. Plan → PlanNode tree
-        let plan = self.planner.plan_to_tree(&parsed)?;
-        let t2 = std::time::Instant::now();
+            // 2. Plan → PlanNode tree
+            let plan = self.planner.plan_to_tree(&parsed)?;
+            let t2 = std::time::Instant::now();
 
-        // 3. Resolve query vector from the AST
-        let query_vector = self.resolve_query_vector(&parsed).await?;
-        let t3 = std::time::Instant::now();
+            // 3. Resolve query vector from the AST
+            let query_vector = self.resolve_query_vector(&parsed).await?;
+            let t3 = std::time::Instant::now();
 
-        // 4. Execute the PlanNode tree
-        let results = self.execute_plan(&plan, &query_vector, user_id).await?;
-        let t4 = std::time::Instant::now();
+            // 4. Execute the PlanNode tree
+            let results = self.execute_plan(&plan, &query_vector, user_id).await?;
+            let t4 = std::time::Instant::now();
 
-        Ok(QueryResult {
-            total: results.len(),
-            results,
-            timings: QueryTimings {
-                parse_ms: duration_ms(t1 - t0),
-                plan_ms: duration_ms(t2 - t1),
-                embed_ms: duration_ms(t3 - t2),
-                search_ms: duration_ms(t4 - t3),
-                total_ms: duration_ms(t4 - t0),
-            },
-        })
+            Ok::<QueryResult, tesseract_common::error::Error>(QueryResult {
+                total: results.len(),
+                results,
+                timings: QueryTimings {
+                    parse_ms: duration_ms(t1 - t0),
+                    plan_ms: duration_ms(t2 - t1),
+                    embed_ms: duration_ms(t3 - t2),
+                    search_ms: duration_ms(t4 - t3),
+                    total_ms: duration_ms(t4 - t0),
+                },
+            })
+        };
+
+        match tokio::time::timeout(self.query_timeout, inner).await {
+            Ok(result) => result,
+            Err(_) => Err(tesseract_common::error::Error::ServiceError(
+                "query timed out".into(),
+            )),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -539,7 +561,7 @@ mod tests {
         // Insert 50 vectors (dim 4) with seed 1.0
         insert_vectors(&engine, 50, 4, 1.0).await;
 
-        let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
+        let executor = QueryExecutor::new(engine, embedder, episodic, test_config(), Duration::from_secs(30));
 
         let result = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 10", None).await;
         assert!(result.is_err(), "NoopEmbedding should produce an embed error");
@@ -576,7 +598,7 @@ mod tests {
 
         insert_vectors(&engine, 10, 4, 0.0).await;
 
-        let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
+        let executor = QueryExecutor::new(engine, embedder, episodic, test_config(), Duration::from_secs(30));
         let result = executor.execute("FIND SIMILARITY(emb, 'quantum computing')", None).await;
 
         assert!(result.is_err());
@@ -597,7 +619,7 @@ mod tests {
 
         insert_vectors(&engine, 10, 4, 0.0).await;
 
-        let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
+        let executor = QueryExecutor::new(engine, embedder, episodic, test_config(), Duration::from_secs(30));
         let result = executor.execute("FIND SIMILARITY(emb, 'should error')", None).await;
 
         assert!(result.is_err());
@@ -610,7 +632,7 @@ mod tests {
         let embedder = Arc::new(NoopEmbeddingService) as Arc<dyn EmbeddingService>;
         let episodic = Arc::new(EpisodicMemory::new());
 
-        let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
+        let executor = QueryExecutor::new(engine, embedder, episodic, test_config(), Duration::from_secs(30));
         let err = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 5", None).await.unwrap_err();
         assert!(!err.to_string().is_empty());
     }
@@ -677,7 +699,7 @@ mod tests {
         // Now verify executor passes user_id through to episodic.
         insert_vectors(&engine, 10, 4, 0.0).await;
 
-        let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
+        let executor = QueryExecutor::new(engine, embedder, episodic, test_config(), Duration::from_secs(30));
         let result = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 5", Some("alice")).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -694,7 +716,7 @@ mod tests {
         // bob has no footprint
         assert!(episodic.get_footprint("bob").unwrap().is_none());
 
-        let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
+        let executor = QueryExecutor::new(engine, embedder, episodic, test_config(), Duration::from_secs(30));
         let result = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 5", Some("bob")).await;
         assert!(result.is_err(), "should still fail at embed, not at footprint");
     }

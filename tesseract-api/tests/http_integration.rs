@@ -84,7 +84,7 @@ async fn build_test_app() -> (axum::Router, tempfile::TempDir) {
 
     let embedder = Arc::new(TestEmbeddingService) as Arc<dyn EmbeddingService>;
     let episodic = Arc::new(EpisodicMemory::new());
-    let executor = Arc::new(QueryExecutor::new(storage.clone(), embedder, episodic, planner_config()));
+    let executor = Arc::new(QueryExecutor::new(storage.clone(), embedder, episodic, planner_config(), std::time::Duration::from_secs(30)));
     let state = AppState { executor, storage };
     let app = http::build_router(state);
 

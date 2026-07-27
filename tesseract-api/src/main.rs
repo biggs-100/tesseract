@@ -11,7 +11,9 @@
 //! - `TESSERACT_AUTH_MODE` — auth mode: `none`, `api-key`, `jwt`, `both` (default: `none`)
 //! - `TESSERACT_API_KEYS` — comma-separated `key:role` pairs for API key auth
 //! - `TESSERACT_JWT_SECRET` — HMAC secret for JWT validation
+//! - `TESSERACT_RATE_LIMIT_RPM` — max requests per minute per IP (default: `100`)
 //! - `TESSERACT_QUERY_TIMEOUT_SECS` — implicit query timeout (default: `30`)
+//! - `TESSERACT_LOG_FORMAT` — log format: `text` or `json` (default: `text`)
 
 use std::sync::Arc;
 
@@ -21,6 +23,7 @@ use tracing_subscriber::EnvFilter;
 
 use tesseract_api::auth::create_auth_provider;
 use tesseract_api::http::{self, AppState};
+use tesseract_api::rate_limiter::RateLimiter;
 use tesseract_core::embedding::NoopEmbeddingService;
 use tesseract_core::episodic::EpisodicMemory;
 use tesseract_storage::engine::StorageEngine;
@@ -64,6 +67,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(30);
 
+    let query_timeout_secs = std::env::var("TESSERACT_QUERY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30);
+
+    let rate_limit_rpm = std::env::var("TESSERACT_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(100);
+
     let storage_config = StorageConfig {
         wal: WalConfig { wal_dir: std::path::PathBuf::from(&data_dir).join("wal"), ..Default::default() },
         hot: HotStoreConfig { max_records: 100_000 },
@@ -92,7 +105,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let episodic = Arc::new(EpisodicMemory::new());
 
     let planner_config = PlannerConfig::default();
-    let executor = Arc::new(QueryExecutor::new(storage.clone(), embedder, episodic, planner_config));
+    let executor = Arc::new(QueryExecutor::new(
+        storage.clone(),
+        embedder,
+        episodic,
+        planner_config,
+        std::time::Duration::from_secs(query_timeout_secs),
+    ));
 
     // Initialize auth provider.
     let auth_provider = create_auth_provider();
@@ -102,8 +121,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Authentication disabled (dev mode)");
     }
 
+    // Initialize rate limiter.
+    let rate_limiter = Arc::new(RateLimiter::new(rate_limit_rpm));
+    info!("Rate limit: {rate_limit_rpm} req/min per IP");
+
     let state = AppState { executor: executor.clone(), storage: storage.clone() };
-    let router = http::build_router_with_auth(state, auth_provider);
+    let router = http::build_router_with_config(state, auth_provider, Some(rate_limiter));
 
     // Start the gRPC server in a background task when the `grpc` feature is enabled.
     #[cfg(feature = "grpc")]

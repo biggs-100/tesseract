@@ -84,7 +84,7 @@ async fn main() {
         cost_per_distance_ms: 0.000_001,
         merkle_enabled: true,
     };
-    let executor = QueryExecutor::new(storage.clone(), embedder, episodic, planner_config);
+    let executor = QueryExecutor::new(storage.clone(), embedder, episodic, planner_config, std::time::Duration::from_secs(30));
 
     // -----------------------------------------------------------------------
     // Pillar 1: VQL

@@ -3,11 +3,12 @@
 
 //! HTTP API layer — Axum router, handlers, request/response types.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -20,6 +21,7 @@ use tesseract_storage::engine::StorageEngine;
 use tesseract_vql::executor::{QueryExecutor, ScoredResult};
 
 use crate::auth::{AuthError, AuthProvider};
+use crate::rate_limiter::RateLimiter;
 
 // ---------------------------------------------------------------------------
 // Shared application state
@@ -126,20 +128,54 @@ async fn auth_middleware(
 use axum::Extension;
 
 // ---------------------------------------------------------------------------
+// Rate limiter middleware
+// ---------------------------------------------------------------------------
+
+async fn rate_limit_middleware(
+    Extension(limiter): axum::Extension<Arc<RateLimiter>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, Response> {
+    let ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+        .or_else(|| {
+            req.headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        })
+        .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+
+    match limiter.check(ip).await {
+        Ok(()) => Ok(next.run(req).await),
+        Err(()) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", "60")],
+            Json(serde_json::json!({"error": "rate limit exceeded"})),
+        )
+            .into_response()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router builders
 // ---------------------------------------------------------------------------
 
 /// Build the axum [`Router`] with all HTTP endpoints.
 ///
-/// No auth — use [`build_router_with_auth`] for authenticated deployments.
+/// No auth or rate limiting — use [`build_router_with_config`] for production.
 pub fn build_router(state: AppState) -> Router {
-    build_router_with_auth(state, None)
+    build_router_with_config(state, None, None)
 }
 
-/// Build the axum [`Router`] with optional authentication.
-pub fn build_router_with_auth(
+/// Build the axum [`Router`] with optional auth and rate limiting.
+pub fn build_router_with_config(
     state: AppState,
     auth_provider: Option<Box<dyn AuthProvider>>,
+    rate_limiter: Option<Arc<RateLimiter>>,
 ) -> Router {
     let public_routes = Router::new()
         .route("/health/liveness", get(liveness_handler))
@@ -158,10 +194,18 @@ pub fn build_router_with_auth(
             .layer(axum::Extension(Arc::new(auth)));
     }
 
-    Router::new()
+    let mut app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
-        .with_state(state)
+        .with_state(state);
+
+    if let Some(rl) = rate_limiter {
+        app = app
+            .layer(middleware::from_fn(rate_limit_middleware))
+            .layer(axum::Extension(rl));
+    }
+
+    app
 }
 
 // ---------------------------------------------------------------------------

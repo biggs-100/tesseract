@@ -429,7 +429,7 @@ async fn main() {
         ..Default::default()
     };
 
-    let executor = QueryExecutor::new(storage, embedder, episodic, planner_config.clone());
+    let executor = QueryExecutor::new(storage, embedder, episodic, planner_config.clone(), std::time::Duration::from_secs(30));
     let planner = QueryPlanner::new(planner_config);
 
     print_welcome();

@@ -90,7 +90,7 @@ async fn main() {
         merkle_enabled: true,
         topological_alpha: 1.5,   // strong bias for demo clarity
     };
-    let executor = QueryExecutor::new(storage.clone(), embedder, episodic, planner_config);
+    let executor = QueryExecutor::new(storage.clone(), embedder, episodic, planner_config, std::time::Duration::from_secs(30));
 
     // -----------------------------------------------------------------------
     // Pillar 1: VQL
