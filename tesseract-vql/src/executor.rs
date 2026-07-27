@@ -176,7 +176,8 @@ impl QueryExecutor {
                     // Apply episodic footprint if user context is available
                     // (backward-compatible: always applied when user_id is provided)
                     let search_vector = if let Some(uid) = user_id {
-                        if let Some(footprint) = self.episodic.get_footprint(uid) {
+                        let footprint = self.episodic.get_footprint(uid)?;
+                        if let Some(footprint) = footprint {
                             EpisodicMemory::apply_footprint(query_vector, &footprint)
                         } else {
                             query_vector.to_vec()
@@ -189,7 +190,7 @@ impl QueryExecutor {
                     // the metadata filter region) so HNSW naturally finds results
                     // that match the filter, without post-filtering.
                     let biased_vector = if !bias_filters.is_empty() {
-                        self.storage.apply_topological_bias(&search_vector, bias_filters, *topological_alpha)
+                        self.storage.apply_topological_bias(&search_vector, bias_filters, *topological_alpha)?
                     } else {
                         search_vector
                     };
@@ -221,7 +222,8 @@ impl QueryExecutor {
                         // Personal bias modifies the query vector pre-search.
                         // Apply footprint and delegate to child with biased vector.
                         let biased_vector = if let Some(uid) = user_id {
-                            if let Some(footprint) = self.episodic.get_footprint(uid) {
+                            let footprint = self.episodic.get_footprint(uid)?;
+                            if let Some(footprint) = footprint {
                                 EpisodicMemory::apply_footprint(query_vector, &footprint)
                             } else {
                                 query_vector.to_vec()
@@ -490,6 +492,7 @@ mod tests {
             lifecycle: LifecycleConfig::default(),
             topological: TopologicalConfig::default(),
             merkle: tesseract_storage::types::MerkleConfig::default(),
+            shutdown: ShutdownConfig::default(),
         }
     }
 
@@ -660,7 +663,7 @@ mod tests {
         episodic.update_footprint("alice", &clicked, &query_vec).unwrap();
 
         // Verify footprint exists.
-        let fp = episodic.get_footprint("alice");
+        let fp = episodic.get_footprint("alice").unwrap();
         assert!(fp.is_some(), "footprint should exist for alice");
 
         // Verify apply_footprint produces expected modified vector.
@@ -689,7 +692,7 @@ mod tests {
         let episodic = Arc::new(EpisodicMemory::new());
 
         // bob has no footprint
-        assert!(episodic.get_footprint("bob").is_none());
+        assert!(episodic.get_footprint("bob").unwrap().is_none());
 
         let executor = QueryExecutor::new(engine, embedder, episodic, test_config());
         let result = executor.execute("FIND SIMILARITY(emb, 'test') LIMIT 5", Some("bob")).await;

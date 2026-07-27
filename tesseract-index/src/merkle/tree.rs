@@ -362,7 +362,7 @@ impl MerkleTree {
             max_cluster_size: self.max_cluster_size,
         };
 
-        let bytes = bincode::serialize(&snapshot).map_err(|e| Error::BincodeError(e.to_string()))?;
+        let bytes = bincode::serialize(&snapshot).map_err(|e| Error::SerializationError(e.to_string()))?;
         std::fs::write(path, bytes).map_err(Error::IoError)?;
         Ok(())
     }
@@ -371,7 +371,7 @@ impl MerkleTree {
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let bytes = std::fs::read(path).map_err(Error::IoError)?;
         let snapshot: TreeSnapshot =
-            bincode::deserialize(&bytes).map_err(|e| Error::BincodeError(e.to_string()))?;
+            bincode::deserialize(&bytes).map_err(|e| Error::SerializationError(e.to_string()))?;
 
         Ok(Self {
             root: snapshot.root,

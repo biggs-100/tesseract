@@ -215,7 +215,7 @@ fn build_trackers(data: &[DataPoint]) -> (CentroidTracker, CorrelationTracker, N
     let mut centroids = CentroidTracker::new(DIM);
     let mut correlations = CorrelationTracker::new(DIM);
     let mut buckets = NumericalBucketTracker::new(DIM);
-    buckets.register_field("year", vec![2015.0, 2018.0, 2021.0, 2024.0]);
+    buckets.register_field("year", vec![2015.0, 2018.0, 2021.0, 2024.0]).expect("static bucket config");
     let cat_fields = vec!["category".to_string()];
 
     for dp in data {

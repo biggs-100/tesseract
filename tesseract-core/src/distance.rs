@@ -11,24 +11,29 @@ pub trait Distance {
 
 /// L2-normalized vector wrapper.
 ///
-/// Construction divides by the L2 norm; panics on zero or non-finite input.
-/// The inner `Vec<f64>` is private — all construction goes through `::new()`
-/// which enforces normalization.
+/// Construction divides by the L2 norm; returns `Err` on zero or non-finite
+/// input. The inner `Vec<f64>` is private — all construction goes through
+/// `::new()` which enforces normalization.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(try_from = "Vec<f64>")]
 pub struct NormalizedVector(Vec<f64>);
 
 impl NormalizedVector {
-    /// Build a `NormalizedVector` from raw components, asserting L2
+    /// Build a `NormalizedVector` from raw components, enforcing L2
     /// normalization invariants (non-zero, finite norm).
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the input vector is zero or contains non-finite values (NaN/Inf).
-    pub fn new(v: Vec<f64>) -> Self {
+    /// Returns `Err(Error::InvalidVector(...))` if the input vector is
+    /// zero or contains non-finite values (NaN/Inf).
+    pub fn new(v: Vec<f64>) -> Result<Self> {
         let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        assert!(norm.is_finite() && norm > 0.0, "NormalizedVector requires a finite, non-zero vector");
-        Self(v.into_iter().map(|x| x / norm).collect())
+        if !norm.is_finite() || norm == 0.0 {
+            return Err(Error::InvalidVector(
+                "vector must be finite and non-zero".into(),
+            ));
+        }
+        Ok(Self(v.into_iter().map(|x| x / norm).collect()))
     }
 }
 
@@ -37,7 +42,7 @@ impl TryFrom<Vec<f64>> for NormalizedVector {
     type Error = String;
 
     fn try_from(v: Vec<f64>) -> std::result::Result<Self, Self::Error> {
-        Ok(Self::new(v))
+        Self::new(v).map_err(|e| e.to_string())
     }
 }
 
@@ -87,25 +92,29 @@ mod tests {
 
     #[test]
     fn normalize_3_4_gives_0_6_0_8() {
-        let nv = NormalizedVector::new(vec![3.0, 4.0]);
+        let nv = NormalizedVector::new(vec![3.0, 4.0]).unwrap();
         assert_eq!(&*nv, &vec![0.6, 0.8]);
     }
 
     #[test]
     fn normalize_already_unit() {
-        let nv = NormalizedVector::new(vec![1.0, 0.0]);
+        let nv = NormalizedVector::new(vec![1.0, 0.0]).unwrap();
         assert_eq!(&*nv, &vec![1.0, 0.0]);
     }
 
     #[test]
-    #[should_panic(expected = "NormalizedVector requires a finite, non-zero vector")]
-    fn zero_vector_panics() {
-        let _ = NormalizedVector::new(vec![0.0, 0.0, 0.0]);
+    fn zero_vector_returns_err() {
+        assert!(NormalizedVector::new(vec![0.0, 0.0, 0.0]).is_err());
+    }
+
+    #[test]
+    fn nan_vector_returns_err() {
+        assert!(NormalizedVector::new(vec![f64::NAN, 1.0]).is_err());
     }
 
     #[test]
     fn new_with_single_element() {
-        let nv = NormalizedVector::new(vec![5.0]);
+        let nv = NormalizedVector::new(vec![5.0]).unwrap();
         assert!((nv[0] - 1.0).abs() < 1e-15);
     }
 
@@ -115,23 +124,23 @@ mod tests {
 
     #[test]
     fn cosine_identical_vectors() {
-        let a = CosineDistance(NormalizedVector::new(vec![3.0, 4.0]));
-        let b = CosineDistance(NormalizedVector::new(vec![3.0, 4.0]));
+        let a = CosineDistance(NormalizedVector::new(vec![3.0, 4.0]).unwrap());
+        let b = CosineDistance(NormalizedVector::new(vec![3.0, 4.0]).unwrap());
         assert_eq!(a.distance(&b).unwrap(), 0.0);
     }
 
     #[test]
     fn cosine_orthogonal_vectors() {
-        let a = CosineDistance(NormalizedVector::new(vec![1.0, 0.0]));
-        let b = CosineDistance(NormalizedVector::new(vec![0.0, 1.0]));
+        let a = CosineDistance(NormalizedVector::new(vec![1.0, 0.0]).unwrap());
+        let b = CosineDistance(NormalizedVector::new(vec![0.0, 1.0]).unwrap());
         let dist = a.distance(&b).unwrap();
         assert!((dist - 1.0).abs() < 1e-15);
     }
 
     #[test]
     fn cosine_dimension_mismatch() {
-        let a = CosineDistance(NormalizedVector::new(vec![1.0, 0.0]));
-        let b = CosineDistance(NormalizedVector::new(vec![1.0]));
+        let a = CosineDistance(NormalizedVector::new(vec![1.0, 0.0]).unwrap());
+        let b = CosineDistance(NormalizedVector::new(vec![1.0]).unwrap());
         let err = a.distance(&b).unwrap_err();
         assert!(matches!(err, Error::DimensionMismatch(2, 1)));
     }

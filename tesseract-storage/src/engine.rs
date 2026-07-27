@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use tesseract_common::error::{Error, Result};
 use tesseract_core::projection::WeightMask;
@@ -33,7 +33,6 @@ use crate::wal::{WalEntry, WriteAheadLog};
 
 /// The top-level storage engine that coordinates WAL, tiers, cache,
 /// lifecycle, and the ANN index.
-#[allow(dead_code)]
 pub struct StorageEngine {
     wal: Arc<WriteAheadLog>,
     hot: Arc<HotStore>,
@@ -72,7 +71,7 @@ impl StorageEngine {
         let skeleton = Arc::new(VectorSkeleton::new(config.skeleton.clone()));
 
         // 5. Initialize page cache.
-        let cache = Arc::new(Mutex::new(PageCache::new(config.cache.capacity)));
+        let cache = Arc::new(Mutex::new(PageCache::new(config.cache.capacity)?));
 
         // 6. Initialize ANN index (if enabled).
         let index = if config.index.enabled {
@@ -109,7 +108,7 @@ impl StorageEngine {
         }
 
         // 8. Initialize skeleton from cold store partitions.
-        for partition in cold.partitions() {
+        for partition in cold.partitions()? {
             let records = cold.read_partition(&partition).await?;
             if !records.is_empty() {
                 let vectors: Vec<Vec<f64>> = records.iter().map(|r| r.vector.clone()).collect();
@@ -117,7 +116,7 @@ impl StorageEngine {
             }
         }
 
-        info!("StorageEngine opened: cold_partitions={}", cold.partitions().len());
+        info!("StorageEngine opened: cold_partitions={}", cold.partitions()?.len());
 
         // 9. Initialize topological bias trackers (if enabled).
         let centroids = if config.topological.enabled {
@@ -144,7 +143,7 @@ impl StorageEngine {
             let mut bt = NumericalBucketTracker::new(dim);
             let n_bucketed = config.topological.numerical_buckets.len();
             for (field, boundaries) in &config.topological.numerical_buckets {
-                bt.register_field(field, boundaries.clone());
+                bt.register_field(field, boundaries.clone())?;
             }
             if n_bucketed > 0 {
                 info!("Bucketized centroids enabled for {} numerical fields", n_bucketed);
@@ -222,7 +221,7 @@ impl StorageEngine {
             // Use JSON for the payload because serde_json::Value does not
             // roundtrip through bincode (bincode does not support deserialize_any).
             payload: serde_json::to_vec(&(id.clone(), &vector, &metadata))
-                .map_err(|e| Error::BincodeError(e.to_string()))?,
+                .map_err(|e| Error::JsonError(e.to_string()))?,
         };
 
         match mode {
@@ -239,11 +238,11 @@ impl StorageEngine {
         // Update topological bias trackers BEFORE metadata is moved
         // into VectorRecord (borrow check).
         if let Some(ref centroids_lock) = self.centroids {
-            let mut c = centroids_lock.lock().unwrap();
+            let mut c = centroids_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             c.update(&vector, &metadata, &self.config.topological.categorical_fields);
         }
         if let Some(ref correlations_lock) = self.correlations {
-            let mut c = correlations_lock.lock().unwrap();
+            let mut c = correlations_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             for field in &self.config.topological.numerical_fields {
                 if let Some(val) = metadata.get(field) {
                     if let Some(num) = val.as_f64() {
@@ -254,7 +253,7 @@ impl StorageEngine {
         }
         // Update bucketized centroid tracker for fields with configured buckets
         if let Some(ref buckets_lock) = self.buckets {
-            let mut b = buckets_lock.lock().unwrap();
+            let mut b = buckets_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             for field in self.config.topological.numerical_buckets.keys() {
                 if let Some(val) = metadata.get(field) {
                     if let Some(num) = val.as_f64() {
@@ -286,7 +285,7 @@ impl StorageEngine {
 
         // Insert into HotBuffer (if Merkle tree is enabled).
         if let Some(ref buffer_lock) = self.hot_buffer {
-            let mut buffer = buffer_lock.lock().unwrap();
+            let mut buffer = buffer_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             let vector_f32: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
             let is_full = buffer.insert(id.0, vector_f32, metadata.clone());
 
@@ -296,7 +295,7 @@ impl StorageEngine {
                 if !buffer.merging.swap(true, Ordering::AcqRel) {
                     let snapshot = buffer.drain();
                     if let Some(ref tree_lock) = self.merkle_tree {
-                        let mut tree = tree_lock.lock().unwrap();
+                        let mut tree = tree_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
                         tree.insert_batch(&snapshot);
                         info!(
                             "Merkle merge complete: {} vectors merged, {} centroids",
@@ -330,7 +329,7 @@ impl StorageEngine {
         }
 
         // 2. Search cold store partitions.
-        for partition in self.cold.partitions() {
+        for partition in self.cold.partitions()? {
             let records = self.cold.read_partition(&partition).await?;
             if let Some(record) = records.into_iter().find(|r| &r.id == id) {
                 // Cache a page representing this partition lookup.
@@ -340,7 +339,7 @@ impl StorageEngine {
                 if let Ok(page_data) = bincode::serialize(&record) {
                     let cache_page = Page { data: page_data, size: std::mem::size_of::<VectorRecord>() };
                     let cache = self.cache.lock().await;
-                    cache.insert(page_key, cache_page);
+                    let _ = cache.insert(page_key, cache_page);
                 }
 
                 return Ok(Some(record));
@@ -372,7 +371,7 @@ impl StorageEngine {
 
         // 2. Search HotBuffer if active.
         if let Some(ref buffer_lock) = self.hot_buffer {
-            let buffer = buffer_lock.lock().unwrap();
+            let buffer = buffer_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             if !buffer.is_empty() {
                 let hot_results = buffer.search(&query_f32, k);
                 all_results.extend(hot_results.into_iter().map(|(id, score)| (VectorId(id), score)));
@@ -381,7 +380,7 @@ impl StorageEngine {
 
         // 3. Search MerkleTree if available.
         if let Some(ref tree_lock) = self.merkle_tree {
-            let tree = tree_lock.lock().unwrap();
+            let tree = tree_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             if tree.num_centroids() > 0 {
                 let tree_results = tree.search(&query_f32, k);
                 all_results.extend(tree_results.into_iter().map(|(_cluster_id, score)| {
@@ -453,24 +452,55 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Graceful shutdown — persist index and flush WAL.
+    /// Graceful shutdown — drain HotBuffer, flush WAL, persist index.
+    ///
+    /// Operations are wrapped in a configurable timeout. If shutdown
+    /// exceeds the timeout, a warning is logged but the process still
+    /// terminates without blocking indefinitely.
     pub async fn shutdown(&self) -> Result<()> {
-        // Persist index before shutting down so the next session can
-        // reload it without a full WAL recovery.
-        if let Some(ref idx_lock) = self.index {
-            let idx = idx_lock.lock().await;
-            let index_path = &self.config.index.path;
-            if let Some(parent) = index_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let mut file = std::fs::File::create(index_path).map_err(Error::IoError)?;
-            idx.save(&mut file)?;
-            info!("Index saved to {}", index_path.display());
-        }
+        let timeout = std::time::Duration::from_secs(self.config.shutdown.timeout_secs);
 
-        self.wal.flush().await?;
-        info!("StorageEngine shut down");
-        Ok(())
+        tokio::time::timeout(timeout, async {
+            // 1. Persist index so the next session can reload it
+            //    without a full WAL recovery.
+            if let Some(ref idx_lock) = self.index {
+                let idx = idx_lock.lock().await;
+                let index_path = &self.config.index.path;
+                if let Some(parent) = index_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let mut file = std::fs::File::create(index_path).map_err(Error::IoError)?;
+                idx.save(&mut file)?;
+                info!("Index saved to {}", index_path.display());
+            }
+
+            // 2. Drain HotBuffer (progressive Merkle tree tier).
+            if let Some(ref buffer_lock) = self.hot_buffer {
+                let mut buffer = buffer_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
+                if !buffer.is_empty() {
+                    let snapshot = buffer.drain();
+                    if let Some(ref tree_lock) = self.merkle_tree {
+                        let mut tree = tree_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
+                        tree.insert_batch(&snapshot);
+                        // Persist if path is configured.
+                        if let Some(path) = &self.config.merkle.merkle_tree_path {
+                            if let Err(e) = tree.save(path) {
+                                warn!("Failed to persist Merkle tree during shutdown: {}", e);
+                            }
+                        }
+                    }
+                    info!("HotBuffer drained during shutdown: {} vectors", snapshot.len());
+                }
+            }
+
+            // 3. Flush WAL.
+            self.wal.flush().await?;
+
+            info!("StorageEngine shut down");
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::ServiceError("shutdown timed out".into()))?
     }
 
     /// Apply topological bias to a query vector using centroid,
@@ -478,23 +508,42 @@ impl StorageEngine {
     ///
     /// Returns the biased vector when topological tracking is enabled;
     /// returns the query unchanged when it is disabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(Error::LockPoisoned(...))` if any internal mutex is poisoned.
     pub fn apply_topological_bias(
         &self,
         query: &[f64],
         filters: &[topological::BiasFilter],
         alpha: f64,
-    ) -> Vec<f64> {
+    ) -> Result<Vec<f64>> {
         match (&self.centroids, &self.correlations, &self.buckets) {
             (Some(centroids_lock), Some(correlations_lock), Some(buckets_lock)) => {
-                let centroids = centroids_lock.lock().unwrap();
-                let correlations = correlations_lock.lock().unwrap();
-                let buckets = buckets_lock.lock().unwrap();
-                topological::apply_topological_bias(
+                let centroids = centroids_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
+                let correlations = correlations_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
+                let buckets = buckets_lock.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
+                Ok(topological::apply_topological_bias(
                     query, filters, &centroids, &correlations, &buckets, alpha,
-                )
+                ))
             }
-            _ => query.to_vec(),
+            _ => Ok(query.to_vec()),
         }
+    }
+
+    /// Check if the storage engine is ready for requests.
+    ///
+    /// Returns a map of component → status for diagnostics.
+    /// Used by the `/health/readiness` endpoint.
+    pub fn is_ready(&self) -> std::collections::HashMap<String, bool> {
+        let mut diag = std::collections::HashMap::new();
+        // WAL is always present (loaded during open).
+        diag.insert("wal".to_string(), true);
+        // Index may not be enabled.
+        diag.insert("index".to_string(), self.index.is_some());
+        // HotBuffer is present when Merkle is enabled.
+        diag.insert("hot_buffer".to_string(), self.hot_buffer.is_some());
+        diag
     }
 
     // ─── helpers ──────────────────────────────────────────────────────
@@ -507,7 +556,7 @@ impl StorageEngine {
         }
 
         let (id, vector, metadata) = serde_json::from_slice::<(VectorId, Vec<f64>, serde_json::Value)>(&entry.payload)
-            .map_err(|e| Error::BincodeError(e.to_string()))?;
+            .map_err(|e| Error::JsonError(e.to_string()))?;
 
         let record = VectorRecord {
             id,
@@ -535,7 +584,7 @@ impl StorageEngine {
         }
 
         let (id, vector, _metadata): (VectorId, Vec<f64>, serde_json::Value) =
-            serde_json::from_slice(&entry.payload).map_err(|e| Error::BincodeError(e.to_string()))?;
+            serde_json::from_slice(&entry.payload).map_err(|e| Error::JsonError(e.to_string()))?;
 
         let mut idx = idx_lock.lock().await;
         // Skip duplicates silently (idempotent insert inside HnswIndex).
@@ -572,6 +621,7 @@ mod tests {
             lifecycle: LifecycleConfig::default(),
             topological: TopologicalConfig::default(),
             merkle: MerkleConfig::default(),
+            shutdown: ShutdownConfig::default(),
         }
     }
 
@@ -605,6 +655,7 @@ mod tests {
                     .collect(),
             },
             merkle: MerkleConfig::default(),
+            shutdown: ShutdownConfig::default(),
         }
     }
 
@@ -636,6 +687,7 @@ mod tests {
                 max_cluster_size: 100,
                 merkle_tree_path: Some(root.join("merkle.bin")),
             },
+            shutdown: ShutdownConfig::default(),
         }
     }
 
@@ -699,7 +751,7 @@ mod tests {
         let query = vec![1.0, 2.0, 3.0, 4.0];
 
         // With no topological config, bias should return query unchanged
-        let biased = engine.apply_topological_bias(&query, &[], 0.3);
+        let biased = engine.apply_topological_bias(&query, &[], 0.3).unwrap();
         assert_eq!(biased, query);
     }
 
@@ -726,7 +778,7 @@ mod tests {
             kind: BiasKind::Category("science".to_string()),
         }];
         let query = vec![0.0, 0.0, 0.0, 0.0];
-        let biased = engine.apply_topological_bias(&query, &filters, 0.5);
+        let biased = engine.apply_topological_bias(&query, &filters, 0.5).unwrap();
 
         // science centroid = (10, 0, 0, 0), global centroid = (5, 5, 0, 0)
         // delta = (5, -5, 0, 0), bias = alpha * delta = (2.5, -2.5, 0, 0)
@@ -773,7 +825,7 @@ mod tests {
             field: "category".to_string(),
             kind: BiasKind::Category("science".to_string()),
         }];
-        let biased_vec = engine.apply_topological_bias(&query, &filters, 0.5);
+        let biased_vec = engine.apply_topological_bias(&query, &filters, 0.5).unwrap();
         let biased = engine.search(&biased_vec, 10, None).await.unwrap();
 
         // Both should return results (index is populated)
@@ -910,7 +962,7 @@ mod tests {
             kind: BiasKind::Category("science".to_string()),
         }];
         let query = vec![1.0, 2.0, 3.0, 4.0];
-        let biased = engine.apply_topological_bias(&query, &filters, 0.5);
+        let biased = engine.apply_topological_bias(&query, &filters, 0.5).unwrap();
         assert_eq!(biased, query, "disabled topological should not bias");
     }
 }

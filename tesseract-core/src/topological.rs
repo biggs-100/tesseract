@@ -20,6 +20,8 @@
 
 use std::collections::HashMap;
 
+use tesseract_common::error::{Error, Result};
+
 // ---------------------------------------------------------------------------
 // BiasFilter — query-level bias specification
 // ---------------------------------------------------------------------------
@@ -379,10 +381,13 @@ impl NumericalBucketTracker {
     ///   - bucket i (0 < i < n-1): [`boundaries[i]`, `boundaries[i+1]`)
     ///   - bucket n-1: values >= `boundaries[n-1]`
     ///
-    /// # Panics
-    /// Panics if `boundaries` is empty.
-    pub fn register_field(&mut self, field: &str, boundaries: Vec<f64>) {
-        assert!(!boundaries.is_empty(), "bucket boundaries must not be empty");
+    /// # Errors
+    ///
+    /// Returns `Err(Error::InvalidConfig(...))` if `boundaries` is empty.
+    pub fn register_field(&mut self, field: &str, boundaries: Vec<f64>) -> Result<()> {
+        if boundaries.is_empty() {
+            return Err(Error::InvalidConfig("bucket boundaries must not be empty".into()));
+        }
         let n = boundaries.len();
         self.fields.insert(
             field.to_string(),
@@ -392,6 +397,7 @@ impl NumericalBucketTracker {
                 counts: vec![0; n],
             },
         );
+        Ok(())
     }
 
     /// Determine which bucket a value falls into.
@@ -1004,8 +1010,16 @@ mod tests {
 
     fn make_buckets(dim: usize) -> NumericalBucketTracker {
         let mut bt = NumericalBucketTracker::new(dim);
-        bt.register_field("year", vec![2015.0, 2018.0, 2021.0, 2024.0]);
+        bt.register_field("year", vec![2015.0, 2018.0, 2021.0, 2024.0]).unwrap();
         bt
+    }
+
+    #[test]
+    fn bucket_empty_boundaries_returns_err() {
+        let mut bt = NumericalBucketTracker::new(3);
+        let result = bt.register_field("empty", vec![]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("boundaries must not be empty"));
     }
 
     #[test]
@@ -1019,7 +1033,7 @@ mod tests {
     #[test]
     fn bucket_register_field_creates_buckets() {
         let mut bt = NumericalBucketTracker::new(3);
-        bt.register_field("year", vec![2015.0, 2018.0, 2021.0, 2024.0]);
+        bt.register_field("year", vec![2015.0, 2018.0, 2021.0, 2024.0]).unwrap();
         assert!(bt.fields.contains_key("year"));
         let b = bt.fields.get("year").unwrap();
         assert_eq!(b.boundaries.len(), 4);
@@ -1032,7 +1046,7 @@ mod tests {
     fn bucket_has_buckets_true_after_register() {
         let mut bt = NumericalBucketTracker::new(2);
         assert!(!bt.has_buckets("year"));
-        bt.register_field("year", vec![2015.0, 2020.0]);
+        bt.register_field("year", vec![2015.0, 2020.0]).unwrap();
         assert!(bt.has_buckets("year"));
     }
 
@@ -1192,7 +1206,7 @@ mod tests {
         let mut centroids = CentroidTracker::new(2);
         let correlations = CorrelationTracker::new(2);
         let mut buckets = NumericalBucketTracker::new(2);
-        buckets.register_field("year", vec![2015.0, 2020.0]);
+        buckets.register_field("year", vec![2015.0, 2020.0]).unwrap();
 
         // Insert vectors with year correlation
         // bucket 0 (< 2020): low values

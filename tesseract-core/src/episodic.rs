@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use tesseract_common::error::Result;
+use tesseract_common::error::{Error, Result};
 
 /// Per-user footprint vector that biases search results.
 pub struct UserFootprint {
@@ -28,9 +28,12 @@ impl EpisodicMemory {
     }
 
     /// Get a user's footprint vector. Returns `None` if no history.
-    pub fn get_footprint(&self, user_id: &str) -> Option<Vec<f64>> {
-        let fp = self.footprints.read().ok()?;
-        fp.get(user_id).map(|f| f.vector.clone())
+    pub fn get_footprint(&self, user_id: &str) -> Result<Option<Vec<f64>>> {
+        let fp = self
+            .footprints
+            .read()
+            .map_err(|e| Error::LockPoisoned(e.to_string()))?;
+        Ok(fp.get(user_id).map(|f| f.vector.clone()))
     }
 
     /// Update footprint based on implicit feedback.
@@ -41,7 +44,7 @@ impl EpisodicMemory {
         let mut fp = self
             .footprints
             .write()
-            .map_err(|_| tesseract_common::error::Error::ServiceError("Lock poisoned".into()))?;
+            .map_err(|e| Error::LockPoisoned(e.to_string()))?;
 
         let entry = fp.entry(user_id.to_string()).or_insert_with(|| UserFootprint {
             user_id: user_id.to_string(),
@@ -107,7 +110,7 @@ mod tests {
     #[test]
     fn empty_memory_returns_none() {
         let mem = EpisodicMemory::new();
-        assert!(mem.get_footprint("unknown-user").is_none());
+        assert!(mem.get_footprint("unknown-user").unwrap().is_none());
         assert!(mem.is_empty());
         assert_eq!(mem.len(), 0);
     }
@@ -121,7 +124,7 @@ mod tests {
         mem.update_footprint("alice", &clicked, &query).unwrap();
 
         let fp = mem.get_footprint("alice");
-        assert!(fp.is_some());
+        assert!(fp.unwrap().is_some());
         assert_eq!(mem.len(), 1);
         assert!(!mem.is_empty());
 
@@ -129,7 +132,7 @@ mod tests {
         // result = 0.7 * clicked + 0.3 * (clicked * query)
         //       = 0.7 * [1.0, 0.0, 0.0] + 0.3 * [0.5, 0.0, 0.0]
         //       = [0.85, 0.0, 0.0]
-        let fp = fp.unwrap();
+        let fp = mem.get_footprint("alice").unwrap().unwrap();
         assert!((fp[0] - 0.85).abs() < 1e-10);
         assert!((fp[1] - 0.0).abs() < 1e-10);
         assert!((fp[2] - 0.0).abs() < 1e-10);
@@ -146,7 +149,7 @@ mod tests {
         let second_query = make_vector(&[0.0, 0.5, 0.5]);
         mem.update_footprint("bob", &second_click, &second_query).unwrap();
 
-        let fp = mem.get_footprint("bob").unwrap();
+        let fp = mem.get_footprint("bob").unwrap().unwrap();
 
         // First update: blend clicked [1,0,0] with bias [0.5,0,0] → [0.85, 0, 0]
         // Second update: blend [0.85,0,0] with bias [0,0.5,0] → [0.595, 0.15, 0]
@@ -174,7 +177,7 @@ mod tests {
             mem.update_footprint("charlie", &v, &q).unwrap();
         }
 
-        let fp = mem.get_footprint("charlie").unwrap();
+        let fp = mem.get_footprint("charlie").unwrap().unwrap();
         // After 3 updates, should be accessible
         assert!(!fp.is_empty());
     }
@@ -201,8 +204,8 @@ mod tests {
 
         assert_eq!(mem.len(), 2);
 
-        let alice_fp = mem.get_footprint("alice");
-        let bob_fp = mem.get_footprint("bob");
+        let alice_fp = mem.get_footprint("alice").unwrap();
+        let bob_fp = mem.get_footprint("bob").unwrap();
         assert!(alice_fp.is_some());
         assert!(bob_fp.is_some());
     }

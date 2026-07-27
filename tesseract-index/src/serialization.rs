@@ -62,7 +62,7 @@ impl<D: DistanceComputer> HnswIndex<D> {
     ///
     /// # Errors
     ///
-    /// Returns `Error::BincodeError` if serialization fails, or
+    /// Returns `Error::SerializationError` if serialization fails, or
     /// `Error::IoError` if writing fails.
     pub fn save(&self, writer: &mut dyn Write) -> Result<()> {
         let snapshot = HnswSnapshot {
@@ -94,7 +94,7 @@ impl<D: DistanceComputer> HnswIndex<D> {
     /// # Errors
     ///
     /// Returns `Error::GraphCorrupt` if the version prefix is not
-    /// recognised, or `Error::BincodeError` if deserialization fails.
+    /// recognised, or `Error::SerializationError` if deserialization fails.
     pub fn load(&mut self, reader: &mut dyn Read) -> Result<()> {
         let mut version_buf = [0u8; 4];
         reader.read_exact(&mut version_buf)?;

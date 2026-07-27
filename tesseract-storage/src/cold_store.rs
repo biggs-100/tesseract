@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tesseract_common::error::Result;
+use tesseract_common::error::{Error, Result};
 
 use crate::hot_store::VectorRecord;
 
@@ -110,9 +110,9 @@ impl ColdStore {
             return Ok(());
         }
 
-        // 1. Serialise to JSON (bincode cannot handle serde_json::Value).
+        // 1. Serialise to JSON.
         let encoded =
-            serde_json::to_string(records).map_err(|e| tesseract_common::error::Error::BincodeError(e.to_string()))?;
+            serde_json::to_string(records).map_err(|e| Error::JsonError(e.to_string()))?;
         let compressed = zstd::encode_all(std::io::Cursor::new(encoded.as_bytes()), self.config.zstd_level)?;
 
         let part_dir = self.config.data_dir.join(format!("partition_{}", partition.0));
@@ -120,7 +120,7 @@ impl ColdStore {
 
         // 2. Peek batch number under a brief lock.
         let batch_num = {
-            let writers = self.writers.lock().expect("cold store mutex poisoned");
+            let writers = self.writers.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             writers.get(partition).map(|m| m.batch_count + 1).unwrap_or(1)
         };
 
@@ -130,17 +130,17 @@ impl ColdStore {
 
         // 4. Update metadata under lock and serialise JSON (no await while locked).
         let (meta_json, manifest_json) = {
-            let mut writers = self.writers.lock().expect("cold store mutex poisoned");
+            let mut writers = self.writers.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
             let meta = writers.entry(partition.clone()).or_insert_with(PartitionMeta::new);
             meta.record_count += records.len();
             meta.batch_count = batch_num;
             meta.size_bytes += compressed.len() as u64;
 
             let meta_json = serde_json::to_string(&*meta)
-                .map_err(|e| tesseract_common::error::Error::BincodeError(e.to_string()))?;
+                .map_err(|e| Error::JsonError(e.to_string()))?;
             let manifest = Manifest { partitions: writers.keys().map(|p| p.0).collect() };
             let manifest_json = serde_json::to_string(&manifest)
-                .map_err(|e| tesseract_common::error::Error::BincodeError(e.to_string()))?;
+                .map_err(|e| Error::JsonError(e.to_string()))?;
             (meta_json, manifest_json)
         }; // MutexGuard dropped here — before the awaits below
 
@@ -174,7 +174,7 @@ impl ColdStore {
             let compressed = tokio::fs::read(&batch_path).await?;
             let decompressed = zstd::decode_all(std::io::Cursor::new(&compressed))?;
             let batch: Vec<VectorRecord> = serde_json::from_slice(&decompressed)
-                .map_err(|e| tesseract_common::error::Error::BincodeError(e.to_string()))?;
+                .map_err(|e| Error::JsonError(e.to_string()))?;
             all_records.extend(batch);
             batch_num += 1;
         }
@@ -183,15 +183,15 @@ impl ColdStore {
     }
 
     /// Return metadata for a partition, or `None` if unknown.
-    pub fn partition_metadata(&self, partition: &PartitionId) -> Option<PartitionMeta> {
-        let writers = self.writers.lock().expect("cold store mutex poisoned");
-        writers.get(partition).cloned()
+    pub fn partition_metadata(&self, partition: &PartitionId) -> Result<Option<PartitionMeta>> {
+        let writers = self.writers.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
+        Ok(writers.get(partition).cloned())
     }
 
     /// List all partition IDs tracked by this store.
-    pub fn partitions(&self) -> Vec<PartitionId> {
-        let writers = self.writers.lock().expect("cold store mutex poisoned");
-        writers.keys().cloned().collect()
+    pub fn partitions(&self) -> Result<Vec<PartitionId>> {
+        let writers = self.writers.lock().map_err(|e| Error::LockPoisoned(e.to_string()))?;
+        Ok(writers.keys().cloned().collect())
     }
 
     // ─── helpers ──────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ impl ColdStore {
 
         let content = tokio::fs::read_to_string(&manifest_path).await?;
         let manifest: Manifest =
-            serde_json::from_str(&content).map_err(|e| tesseract_common::error::Error::BincodeError(e.to_string()))?;
+            serde_json::from_str(&content).map_err(|e| Error::JsonError(e.to_string()))?;
 
         let mut map = HashMap::new();
         for pid in manifest.partitions {
@@ -294,7 +294,7 @@ mod tests {
         let records: Vec<VectorRecord> = (0..7).map(make_record).collect();
         store.write_batch(&partition, &records).await.unwrap();
 
-        let meta = store.partition_metadata(&partition);
+        let meta = store.partition_metadata(&partition).unwrap();
         assert!(meta.is_some());
         let meta = meta.unwrap();
         assert_eq!(meta.record_count, 7);
@@ -308,7 +308,7 @@ mod tests {
         let store =
             ColdStore::open(ColdStoreConfig { data_dir: dir.path().join("cold"), ..Default::default() }).await.unwrap();
 
-        assert!(store.partition_metadata(&PartitionId(999)).is_none());
+        assert!(store.partition_metadata(&PartitionId(999)).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -320,7 +320,7 @@ mod tests {
         store.write_batch(&PartitionId(1), &(0..3).map(make_record).collect::<Vec<_>>()).await.unwrap();
         store.write_batch(&PartitionId(2), &(0..3).map(make_record).collect::<Vec<_>>()).await.unwrap();
 
-        let partitions = store.partitions();
+        let partitions = store.partitions().unwrap();
         assert_eq!(partitions.len(), 2);
         assert!(partitions.contains(&PartitionId(1)));
         assert!(partitions.contains(&PartitionId(2)));
@@ -343,11 +343,11 @@ mod tests {
         {
             let store = ColdStore::open(ColdStoreConfig { data_dir, ..Default::default() }).await.unwrap();
 
-            let parts = store.partitions();
+            let parts = store.partitions().unwrap();
             assert_eq!(parts.len(), 1);
             assert!(parts.contains(&PartitionId(1)));
 
-            let meta = store.partition_metadata(&PartitionId(1));
+            let meta = store.partition_metadata(&PartitionId(1)).unwrap();
             assert!(meta.is_some());
             assert_eq!(meta.unwrap().record_count, 5);
 
@@ -366,6 +366,6 @@ mod tests {
         store.write_batch(&partition, &[]).await.unwrap();
 
         // No batch files written, metadata unchanged.
-        assert!(store.partition_metadata(&partition).is_none());
+        assert!(store.partition_metadata(&partition).unwrap().is_none());
     }
 }

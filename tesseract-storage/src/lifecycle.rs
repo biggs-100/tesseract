@@ -72,7 +72,7 @@ impl TierLifecycle {
     /// and promotion logic is deferred to a later optimization pass.
     async fn run_promotion(hot: &HotStore, cold: &ColdStore, skeleton: &VectorSkeleton) -> Result<()> {
         let hot_len = hot.len();
-        let cold_partitions = cold.partitions();
+        let cold_partitions = cold.partitions()?;
         let skeleton_len = skeleton.len();
 
         info!(
@@ -83,7 +83,7 @@ impl TierLifecycle {
         // Phase 2: check each partition's access count against
         // cold_min_access threshold and promote qualifying partitions.
         for partition in &cold_partitions {
-            if let Some(meta) = cold.partition_metadata(partition) {
+            if let Ok(Some(meta)) = cold.partition_metadata(partition) {
                 let records = cold.read_partition(partition).await?;
                 if !records.is_empty() {
                     // Promote by inserting each record into hot tier.
@@ -99,7 +99,7 @@ impl TierLifecycle {
                     let _ = skeleton.add_partition(partition.clone(), &vectors);
 
                     info!(
-                        "Promoted partition {} ({} records, {} accesses)",
+                        "Promoted partition {} ({} records, {} bytes)",
                         partition.0, meta.record_count, meta.size_bytes,
                     );
                 }

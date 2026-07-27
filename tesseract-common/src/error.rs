@@ -27,8 +27,20 @@ pub enum Error {
     #[error("Payload truncated: expected {expected} bytes, got {actual}")]
     PayloadTruncated { expected: usize, actual: usize },
 
-    #[error("Bincode error: {0}")]
-    BincodeError(String),
+    #[error("Invalid vector: {0}")]
+    InvalidVector(String),
+
+    #[error("Invalid config: {0}")]
+    InvalidConfig(String),
+
+    #[error("Lock poisoned: {0}")]
+    LockPoisoned(String),
+
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+
+    #[error("JSON error: {0}")]
+    JsonError(String),
 
     #[error("{0} already exists")]
     AlreadyExists(String),
@@ -60,7 +72,7 @@ pub enum Error {
 
 impl From<bincode::Error> for Error {
     fn from(e: bincode::Error) -> Self {
-        Error::BincodeError(e.to_string())
+        Error::SerializationError(e.to_string())
     }
 }
 
@@ -130,5 +142,35 @@ mod tests {
     fn node_conflict_display() {
         let err = Error::NodeConflict("node-a already registered".into());
         assert_eq!(err.to_string(), "Node conflict: node-a already registered");
+    }
+
+    #[test]
+    fn invalid_vector_display() {
+        let err = Error::InvalidVector("vector must be finite and non-zero".into());
+        assert_eq!(err.to_string(), "Invalid vector: vector must be finite and non-zero");
+    }
+
+    #[test]
+    fn invalid_config_display() {
+        let err = Error::InvalidConfig("bucket boundaries must not be empty".into());
+        assert_eq!(err.to_string(), "Invalid config: bucket boundaries must not be empty");
+    }
+
+    #[test]
+    fn lock_poisoned_display() {
+        let err = Error::LockPoisoned("engine mutex".into());
+        assert_eq!(err.to_string(), "Lock poisoned: engine mutex");
+    }
+
+    #[test]
+    fn serialization_error_display() {
+        let err = Error::SerializationError("bincode error".into());
+        assert_eq!(err.to_string(), "Serialization error: bincode error");
+    }
+
+    #[test]
+    fn json_error_display() {
+        let err = Error::JsonError("invalid JSON".into());
+        assert_eq!(err.to_string(), "JSON error: invalid JSON");
     }
 }
