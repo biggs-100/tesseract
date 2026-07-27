@@ -1,6 +1,6 @@
-# Apply Progress: production-readiness PR3
+# Apply Progress: production-readiness PR4
 
-> Status: ✅ All 2 issues complete (A9, A10).
+> Status: ✅ All 2 issues complete (A11, A12).
 
 ---
 
@@ -8,48 +8,36 @@
 
 | Metric | Value |
 |--------|-------|
-| **PR** | PR3 — Quality |
+| **PR** | PR4 — Performance |
 | **Target** | `main` |
 | **Mode** | Standard |
-| **Issues total** | 2 (A9, A10) |
+| **Issues total** | 2 (A11, A12) |
 | **Completed** | 2 |
 | **Blocked** | 0 |
-| **Tests** | All 495+ pass (80 unit + 6 E2E feature-gated + existing 400+) |
-| **Clippy** | Clean (pre-existing warning only: `skeleton` field in `tesseract-storage`) |
-
----
-
-## Commit Log
-
-| Commit | Message | Files |
-|--------|---------|-------|
-| `7b3cf29` | feat(core): add TestEmbeddingService with deterministic SHA-256 embeddings and E2E tests | A9 |
-| `bc6ebd1` | ci: add cargo-deny advisories and cargo-llvm-cov coverage jobs | A10 |
+| **Tests** | All 511 pass (509 existing + 2 new concurrent tests) |
+| **Clippy** | Clean — zero `dead_code` warnings, no suppression attributes |
 
 ---
 
 ## Issue Status
 
-### A9 — TestEmbeddingService ✅
+### A11 — HNSW Locking ✅
 
-| File | Action | What Was Done |
-|------|--------|---------------|
-| `tesseract-core/src/test_embedding.rs` | **Created** | `TestEmbeddingService` implementing `EmbeddingService` trait; SHA-256 → f64 vector → L2 normalize; dim configurable (default 128, clamped to 32); 7 unit tests |
-| `tesseract-core/tests/e2e_test_embedding.rs` | **Created** | 6 E2E integration tests (determinism, normalization, cosine similarity, dimension config, empty input); gated behind `#![cfg(feature = "test-embedding")]` |
-| `tesseract-core/Cargo.toml` | Modified | Added `sha2` as optional dep, `test-embedding = ["dep:sha2"]` feature |
-| `tesseract-core/src/lib.rs` | Modified | Added `#[cfg(feature = "test-embedding")] pub mod test_embedding;` |
-| `Cargo.lock` | Modified | sha2 + transitive deps locked |
+| Task | File(s) | What Was Done |
+|------|---------|---------------|
+| PR4-T1 | `tesseract-index/Cargo.toml`, `tesseract-index/src/hnsw.rs` | Added `parking_lot = "0.12"` dep; added `legacy-locking = []` feature; replaced `std::sync::RwLock` with conditional `parking_lot::RwLock` / `std::sync::RwLock`; removed `.unwrap()` from lock read since parking_lot doesn't poison |
+| PR4-T2 | `tesseract-storage/src/engine.rs`, `tesseract-storage/Cargo.toml` | Added `IndexLock` type alias (tokio::sync::RwLock by default, tokio::sync::Mutex with legacy-locking); `.read().await` for search, `.write().await` for insert/shutdown/replay; feature `legacy-locking` added to Cargo.toml; refactored `replay_index_entry` → `replay_index_entry_inner` to avoid type conflict |
+| PR4-T3 | `tesseract-index/tests/concurrent.rs` (new) | 2 tests: `concurrent_reads_with_write` (10 readers + 1 writer, 10s timeout) and `readers_dont_serialize` (parallelism benchmark); gated with `#![cfg(not(feature = "legacy-locking"))]` |
 
-**Feature**: `test-embedding` — run with `cargo test -p tesseract-core --features test-embedding`
+### A12 — Dead Code ✅
 
-### A10 — CI Hardening ✅
-
-| File | Action | What Was Done |
-|------|--------|---------------|
-| `.github/workflows/ci.yml` | Modified | Updated `audit` job: added advisory-db cache, `cargo deny check advisories` + `check licenses`; added `e2e` job for feature-gated tests; added `coverage` job with `cargo llvm-cov --html` + 70% threshold warning + artifact upload |
-| `deny.toml` | Modified | Added `[advisories]` section with `vulnerability = "deny"`, `unmaintained = "warn"`, `yanked = "warn"` |
-
-**Config**: Advisory DB auto-cached via `hashFiles('**/Cargo.lock')` key
+| File | What Was Done |
+|------|---------------|
+| `tesseract-storage/src/engine.rs` | Removed unused `skeleton: Arc<VectorSkeleton>` field from `StorageEngine` (local variable kept for lifecycle init) |
+| `tesseract-storage/src/hot_store.rs` | Renamed `config` → `_config` (field kept with underscore prefix for future use) |
+| `tesseract-storage/src/wal.rs` | Removed unused `path: PathBuf` field from `SegmentWriter`; prefixed constructor params with `_` |
+| `tesseract-cluster/src/replication.rs` | Removed unused `node_id: String` field from `ReplicationEngine`; prefixed constructor param with `_` |
+| Workspace-wide | All `#[allow(dead_code)]` and `#[expect(dead_code)]` removed from production code |
 
 ---
 
@@ -57,8 +45,9 @@
 
 | ADR | Deviation | Rationale |
 |-----|-----------|-----------|
-| ADR-009 (TestEmbeddingService) | E2E tests in `tesseract-core/tests/` cannot perform INSERT + FIND SIMILARITY via `StorageEngine` | `tesseract-core` does not depend on `tesseract-storage`. Full pipeline E2E belongs in `tesseract-storage/tests/` or `tesseract-api/tests/`. The tests verify embedding determinism, normalization, and cosine similarity at the embedding service level. |
-| ADR-010 (CI) | Use `actions-rust-lang/setup-rust-toolchain@v1` instead of `dtolnay/rust-toolchain` | Consistent with existing CI pattern in the project. |
+| ADR-011 (A11) | `replay_index_entry` refactored to `replay_index_entry_inner` taking `&mut AnyIndex` | The original function took `&Mutex<AnyIndex>`, which doesn't work with the conditional RwLock/Mutex type. Callers now acquire the lock first and pass the guarded reference. |
+| ADR-011 | `tesseract-storage` defines its own `legacy-locking` feature | Both `tesseract-index` and `tesseract-storage` use `#[cfg(feature = "legacy-locking")]`, so each crate needs the feature defined independently. |
+| ADR-012 | `skeleton` field fully removed (not just `#[allow]`) | Clippy flagged it as unused (never read after construction). The local `skeleton` variable is still created for `TierLifecycle::start()` and cold store init. |
 
 ## Issues Found
 
@@ -68,13 +57,15 @@ None.
 
 | Evidence | Value |
 |----------|-------|
-| Focused test command | `cargo test -p tesseract-core --features test-embedding` — 86 tests passed (80 unit + 6 E2E) |
-| Workspace test command | `cargo test --workspace --exclude tesseract-pg` — all 490+ tests pass |
-| Runtime harness | N/A — no external runtime boundary in this PR |
-| Rollback boundary | Revert 2 commits (A9: `tesseract-core/src/test_embedding.rs`, `tesseract-core/tests/`, `tesseract-core/Cargo.toml`, `tesseract-core/src/lib.rs`, `Cargo.lock`; A10: `.github/workflows/ci.yml`, `deny.toml`) |
+| Focused test command | `cargo test --workspace --exclude tesseract-pg` — 511 tests passed |
+| Legacy locking build | `cargo build --features legacy-locking --workspace --exclude tesseract-pg` — compiles clean |
+| Legacy locking tests | `cargo test --features legacy-locking --workspace --exclude tesseract-pg` — 509 tests passed (2 concurrent skipped via cfg) |
+| Clippy (no dead_code) | `cargo clippy --all-targets --workspace --exclude tesseract-pg` — zero dead_code warnings |
+| Runtime harness | N/A — no external runtime boundary |
+| Rollback boundary | Revert A11 changes (`tesseract-index/Cargo.toml`, `tesseract-index/src/hnsw.rs`, `tesseract-storage/src/engine.rs`, `tesseract-storage/Cargo.toml`, `tesseract-index/tests/concurrent.rs`) and A12 changes (`tesseract-storage/src/engine.rs`, `tesseract-storage/src/hot_store.rs`, `tesseract-storage/src/wal.rs`, `tesseract-cluster/src/replication.rs`) independently |
 
 ## Workload / PR Boundary
 
-- **Mode**: Stacked PR (PR3 of 4) → `main`
-- **Changed lines**: ~357 (within 800-line budget)
-- **Commits**: 2 clean commits (A9, A10)
+- **Mode**: Stacked PR (PR4 of 4) → `main`
+- **Changed lines**: ~380 (within 800-line budget)
+- **Feature flag**: `legacy-locking` to revert A11 if needed

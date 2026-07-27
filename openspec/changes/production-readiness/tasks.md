@@ -950,7 +950,7 @@ Issues: A11 (HNSW locking) → A12 (dead code)
 
 ### Issue A11 — HNSW Locking
 
-#### PR4-T1: HNSW RwLock → parking_lot::RwLock
+#### PR4-T1: HNSW RwLock → parking_lot::RwLock `[x]`
 
 - **Issue**: A11 (HNSW locking)
 - **Archivos**: `tesseract-index/src/hnsw.rs`, `tesseract-index/Cargo.toml`
@@ -985,7 +985,7 @@ Issues: A11 (HNSW locking) → A12 (dead code)
   - Tests existentes de HNSW pasan con ambos modes
 - **Estimado**: +60 líneas
 
-#### PR4-T2: StorageEngine Mutex → tokio::sync::RwLock
+#### PR4-T2: StorageEngine Mutex → tokio::sync::RwLock `[x]`
 
 - **Issue**: A11 (HNSW locking)
 - **Archivos**: `tesseract-storage/src/engine.rs`
@@ -1012,7 +1012,7 @@ Issues: A11 (HNSW locking) → A12 (dead code)
   - `cargo build --features legacy-locking` compila
 - **Estimado**: +60 líneas
 
-#### PR4-T3: Tests de concurrencia
+#### PR4-T3: Tests de concurrencia `[x]`
 
 - **Issue**: A11 (HNSW locking)
 - **Archivos**: `tesseract-index/tests/concurrent.rs` (nuevo)
@@ -1064,7 +1064,7 @@ Issues: A11 (HNSW locking) → A12 (dead code)
 
 ### Issue A12 — Dead Code
 
-#### PR4-T4: Remover #[allow(dead_code)] y campos no usados
+#### PR4-T4: Remover #[allow(dead_code)] y campos no usados `[x]`
 
 - **Issue**: A12 (dead code)
 - **Archivos**: `tesseract-storage/src/engine.rs`, `tesseract-storage/src/hot_store.rs`, `tesseract-storage/src/wal.rs`, `tesseract-cluster/src/replication.rs`

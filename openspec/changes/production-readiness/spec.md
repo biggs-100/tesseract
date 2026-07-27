@@ -312,8 +312,8 @@ Issues: A11 (HNSW locking) → A12 (dead code)
 
 ### Acceptance Criteria
 
-- [ ] `cargo test --workspace` passes with the new locking
-- [ ] Concurrency test with concurrent searches + inserts passes
-- [ ] `cargo build --features legacy-locking` compiles
-- [ ] `cargo clippy --all-targets` produces no `dead_code` warnings without suppression attributes
-- [ ] All `#[allow(dead_code)]` and `#[expect(dead_code)]` removed from production code
+- [x] `cargo test --workspace` passes with the new locking
+- [x] Concurrency test with concurrent searches + inserts passes
+- [x] `cargo build --features legacy-locking` compiles
+- [x] `cargo clippy --all-targets` produces no `dead_code` warnings without suppression attributes
+- [x] All `#[allow(dead_code)]` and `#[expect(dead_code)]` removed from production code
