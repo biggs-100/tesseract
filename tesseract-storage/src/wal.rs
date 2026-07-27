@@ -134,8 +134,6 @@ fn serialize_fields_for_crc(txn_id: u64, op_code: u8, payload_len: u32, payload:
 
 struct SegmentWriter {
     file: File,
-    #[expect(dead_code)]
-    path: PathBuf,
     segment_id: SegmentId,
     bytes_written: u64,
     ops_since_fsync: u64,
@@ -143,17 +141,17 @@ struct SegmentWriter {
 
 impl SegmentWriter {
     /// Open a new segment at the given path.
-    async fn create(path: PathBuf, segment_id: SegmentId) -> Result<Self> {
-        let file = File::create(&path).await?;
-        Ok(Self { file, path, segment_id, bytes_written: 0, ops_since_fsync: 0 })
+    async fn create(_path: PathBuf, segment_id: SegmentId) -> Result<Self> {
+        let file = File::create(&_path).await?;
+        Ok(Self { file, segment_id, bytes_written: 0, ops_since_fsync: 0 })
     }
 
     /// Open an existing segment for appending.
-    async fn append(path: PathBuf, segment_id: SegmentId) -> Result<Self> {
-        let file = fs::OpenOptions::new().append(true).open(&path).await?;
+    async fn append(_path: PathBuf, segment_id: SegmentId) -> Result<Self> {
+        let file = fs::OpenOptions::new().append(true).open(&_path).await?;
         let metadata = file.metadata().await?;
         let bytes_written = metadata.len();
-        Ok(Self { file, path, segment_id, bytes_written, ops_since_fsync: 0 })
+        Ok(Self { file, segment_id, bytes_written, ops_since_fsync: 0 })
     }
 
     /// Write entry bytes to the segment file.

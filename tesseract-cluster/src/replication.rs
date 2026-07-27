@@ -83,8 +83,6 @@ impl Default for ReplicationConfig {
 /// can share a single `ReplicationEngine` behind an `Arc`.
 pub struct ReplicationEngine {
     shard_id: u64,
-    #[expect(dead_code)]
-    node_id: String,
     replicas: RwLock<HashMap<String, ReplicaInfo>>,
     pending_entries: RwLock<Vec<ReplicationEntry>>,
     config: ReplicationConfig,
@@ -92,10 +90,9 @@ pub struct ReplicationEngine {
 
 impl ReplicationEngine {
     /// Create a new `ReplicationEngine` for the given shard.
-    pub fn new(shard_id: u64, node_id: &str, config: ReplicationConfig) -> Self {
+    pub fn new(shard_id: u64, _node_id: &str, config: ReplicationConfig) -> Self {
         Self {
             shard_id,
-            node_id: node_id.to_string(),
             replicas: RwLock::new(HashMap::new()),
             pending_entries: RwLock::new(Vec::new()),
             config,

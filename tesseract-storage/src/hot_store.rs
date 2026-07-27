@@ -34,14 +34,13 @@ impl Default for HotStoreConfig {
 /// Fast in-memory store backed by DashMap for concurrent reads/writes.
 pub struct HotStore {
     vectors: Arc<DashMap<VectorId, VectorRecord>>,
-    #[allow(dead_code)]
-    config: HotStoreConfig,
+    _config: HotStoreConfig,
 }
 
 impl HotStore {
     /// Create a new hot store with the given configuration.
     pub fn new(config: HotStoreConfig) -> Self {
-        Self { vectors: Arc::new(DashMap::new()), config }
+        Self { vectors: Arc::new(DashMap::new()), _config: config }
     }
 
     /// Insert a vector record.

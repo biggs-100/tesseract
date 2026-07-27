@@ -2912,6 +2912,7 @@ dependencies = [
  "bincode",
  "blake3",
  "criterion",
+ "parking_lot",
  "rand",
  "rayon",
  "serde",
