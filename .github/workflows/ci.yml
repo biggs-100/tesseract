@@ -58,6 +58,16 @@ jobs:
           toolchain: stable
       - run: cargo test --workspace --exclude tesseract-pg
 
+  e2e:
+    name: cargo test (test-embedding)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo test -p tesseract-core --features test-embedding
+
   pg-extension:
     name: cargo test (tesseract-pg)
     runs-on: ubuntu-latest
@@ -83,5 +93,39 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+      - name: Cache advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-db
+          key: advisory-db-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo install cargo-deny --locked
+      - run: cargo deny check advisories
       - run: cargo deny check licenses
+
+  coverage:
+    name: cargo llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo llvm-cov --workspace --exclude tesseract-pg --html
+      - name: Check coverage threshold
+        run: |
+          cargo llvm-cov --workspace --exclude tesseract-pg --json > cov.json
+          python3 -c "
+          import json
+          with open('cov.json') as f:
+              data = json.load(f)
+          rate = data['data'][0]['totals']['percent_covered']
+          print(f'Coverage: {rate:.1f}%')
+          if rate < 70.0:
+              print('::warning::Coverage below 70% threshold')
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html/
