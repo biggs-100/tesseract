@@ -53,6 +53,7 @@ fn test_storage_config(tmp: &tempfile::TempDir) -> StorageConfig {
         lifecycle: LifecycleConfig::default(),
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     }
 }
 

@@ -73,6 +73,7 @@ async fn main() {
             max_cluster_size: 500,
             merkle_tree_path: Some(dir.path().join("merkle.bin")),
         },
+        shutdown: ShutdownConfig::default(),
     };
 
     let storage = Arc::new(StorageEngine::open(storage_config).await.unwrap());

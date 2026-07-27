@@ -410,6 +410,7 @@ async fn main() {
         lifecycle: LifecycleConfig::default(),
         topological: TopologicalConfig::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     };
 
     let storage = match StorageEngine::open(storage_config).await {

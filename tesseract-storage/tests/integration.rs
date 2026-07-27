@@ -30,6 +30,7 @@ async fn test_engine_insert_and_get() {
         index: IndexConfig { enabled: false, ..Default::default() },
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     };
 
     let engine = StorageEngine::open(config).await.unwrap();
@@ -64,6 +65,7 @@ async fn test_engine_durable_vs_fast() {
         index: IndexConfig { enabled: false, ..Default::default() },
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     };
 
     let engine = StorageEngine::open(config).await.unwrap();
@@ -108,6 +110,7 @@ async fn test_engine_recovery() {
         index: IndexConfig { enabled: false, ..Default::default() },
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     };
 
     // First session.

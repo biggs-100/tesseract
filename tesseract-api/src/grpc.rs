@@ -151,6 +151,7 @@ mod tests {
             index: IndexConfig { enabled: true, dim: 4, hnsw: Default::default(), path: dir.path().join("index.hnsw") },
             topological: Default::default(),
             merkle: Default::default(),
+            shutdown: ShutdownConfig::default(),
         };
         let storage = Arc::new(StorageEngine::open(config).await.unwrap());
         let embedder = Arc::new(NoopEmbeddingService) as Arc<dyn tesseract_core::embedding::EmbeddingService>;

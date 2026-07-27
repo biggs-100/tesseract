@@ -55,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         lifecycle: Default::default(),
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     };
 
     let storage = Arc::new(StorageEngine::open(storage_config).await?);

@@ -44,6 +44,7 @@ fn make_config(dir: &tempfile::TempDir) -> StorageConfig {
         },
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     }
 }
 
@@ -152,6 +153,7 @@ async fn test_engine_search_disabled_index_returns_error() {
         index: IndexConfig { enabled: false, ..Default::default() },
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig::default(),
     };
 
     let engine = StorageEngine::open(config).await.unwrap();

@@ -134,6 +134,7 @@ mod tests {
             lifecycle: Default::default(),
             topological: Default::default(),
             merkle: Default::default(),
+            shutdown: tesseract_storage::types::ShutdownConfig::default(),
         };
         let storage = Arc::new(tesseract_storage::StorageEngine::open(storage_config).await.unwrap());
 

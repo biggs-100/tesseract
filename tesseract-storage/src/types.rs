@@ -75,7 +75,7 @@ impl TryFrom<u8> for OpCode {
             0x03 => Ok(Self::UpdateMetadata),
             0x10 => Ok(Self::IndexInsert),
             0x11 => Ok(Self::IndexDelete),
-            other => Err(tesseract_common::error::Error::BincodeError(format!("unknown opcode: {other}"))),
+            other => Err(tesseract_common::error::Error::SerializationError(format!("unknown opcode: {other}"))),
         }
     }
 }
@@ -185,6 +185,20 @@ impl Default for MerkleConfig {
     }
 }
 
+/// Shutdown configuration for the storage engine.
+#[derive(Debug, Clone)]
+pub struct ShutdownConfig {
+    /// Maximum time in seconds to wait for graceful shutdown operations
+    /// (HotBuffer drain, WAL flush, index persist).
+    pub timeout_secs: u64,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self { timeout_secs: 30 }
+    }
+}
+
 /// Top-level storage engine configuration.
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
@@ -197,4 +211,5 @@ pub struct StorageConfig {
     pub index: IndexConfig,
     pub topological: TopologicalConfig,
     pub merkle: MerkleConfig,
+    pub shutdown: ShutdownConfig,
 }

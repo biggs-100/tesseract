@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use tokio::signal;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use tesseract_api::http::{self, AppState};
@@ -20,6 +22,26 @@ use tesseract_storage::engine::StorageEngine;
 use tesseract_storage::types::*;
 use tesseract_vql::executor::QueryExecutor;
 use tesseract_vql::planner::PlannerConfig;
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        let mut int = signal::unix::signal(signal::unix::SignalKind::interrupt())
+            .expect("failed to install SIGINT handler");
+        tokio::select! {
+            _ = term.recv() => info!("Received SIGTERM, starting shutdown..."),
+            _ = int.recv() => info!("Received SIGINT, starting shutdown..."),
+            _ = signal::ctrl_c() => info!("Received Ctrl+C, starting shutdown..."),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        info!("Received Ctrl+C, starting shutdown...");
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,6 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration from environment.
     let data_dir = std::env::var("TESSERACT_DATA_DIR").unwrap_or_else(|_| "./data".into());
     let listen_addr = std::env::var("TESSERACT_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".into());
+
+    let shutdown_timeout = std::env::var("TESSERACT_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30);
 
     let storage_config = StorageConfig {
         wal: WalConfig { wal_dir: std::path::PathBuf::from(&data_dir).join("wal"), ..Default::default() },
@@ -52,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         topological: Default::default(),
         merkle: Default::default(),
+        shutdown: ShutdownConfig { timeout_secs: shutdown_timeout },
     };
 
     let storage = Arc::new(StorageEngine::open(storage_config).await?);
@@ -82,7 +110,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Tesseract API listening on {}", listen_addr);
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // After axum stops accepting new connections, run storage engine shutdown.
+    storage.shutdown().await?;
 
     Ok(())
 }
