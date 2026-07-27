@@ -11,6 +11,15 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+
+/// Internal alias for the index lock.
+///
+/// By default uses `tokio::sync::RwLock` for concurrent reads + exclusive writes.
+/// With `legacy-locking` feature, uses `tokio::sync::Mutex` (serializes all access).
+#[cfg(not(feature = "legacy-locking"))]
+type IndexLock = tokio::sync::RwLock<AnyIndex>;
+#[cfg(feature = "legacy-locking")]
+type IndexLock = tokio::sync::Mutex<AnyIndex>;
 use tracing::{info, warn};
 
 use tesseract_common::error::{Error, Result};
@@ -37,10 +46,9 @@ pub struct StorageEngine {
     wal: Arc<WriteAheadLog>,
     hot: Arc<HotStore>,
     cold: Arc<ColdStore>,
-    skeleton: Arc<VectorSkeleton>,
     cache: Arc<Mutex<PageCache>>,
     config: StorageConfig,
-    index: Option<Mutex<AnyIndex>>,
+    index: Option<IndexLock>,
     _lifecycle_handle: Option<tokio::task::JoinHandle<()>>,
     /// Topological centroid tracker for categorical metadata fields.
     centroids: Option<std::sync::Mutex<CentroidTracker>>,
@@ -90,7 +98,7 @@ impl StorageEngine {
                 info!("Loaded index from {}", index_path.display());
             }
 
-            Some(Mutex::new(inner))
+            Some(IndexLock::new(inner))
         } else {
             None
         };
@@ -102,7 +110,11 @@ impl StorageEngine {
             for entry in &recovered {
                 Self::apply_wal_entry(&hot, entry)?;
                 if let Some(ref idx_lock) = index {
-                    Self::replay_index_entry(idx_lock, entry).await?;
+                    #[cfg(not(feature = "legacy-locking"))]
+                    let mut idx = idx_lock.write().await;
+                    #[cfg(feature = "legacy-locking")]
+                    let mut idx = idx_lock.lock().await;
+                    Self::replay_index_entry_inner(&mut idx, entry).await?;
                 }
             }
         }
@@ -190,7 +202,6 @@ impl StorageEngine {
             wal,
             hot,
             cold,
-            skeleton,
             cache,
             config,
             index,
@@ -279,6 +290,9 @@ impl StorageEngine {
         // Insert into ANN index (if enabled) so the vector is searchable
         // immediately.
         if let Some(ref idx_lock) = self.index {
+            #[cfg(not(feature = "legacy-locking"))]
+            let mut idx = idx_lock.write().await;
+            #[cfg(feature = "legacy-locking")]
             let mut idx = idx_lock.lock().await;
             idx.insert(id.clone(), &vector)?;
         }
@@ -364,6 +378,9 @@ impl StorageEngine {
 
         // 1. Search existing HNSW index.
         if let Some(ref idx_lock) = self.index {
+            #[cfg(not(feature = "legacy-locking"))]
+            let idx = idx_lock.read().await;
+            #[cfg(feature = "legacy-locking")]
             let idx = idx_lock.lock().await;
             let hnsw_results = idx.search(query, k, mask)?;
             all_results.extend(hnsw_results);
@@ -431,7 +448,11 @@ impl StorageEngine {
         for entry in &entries {
             Self::apply_wal_entry(&self.hot, entry)?;
             if let Some(ref idx_lock) = self.index {
-                Self::replay_index_entry(idx_lock, entry).await?;
+                #[cfg(not(feature = "legacy-locking"))]
+                let mut idx = idx_lock.write().await;
+                #[cfg(feature = "legacy-locking")]
+                let mut idx = idx_lock.lock().await;
+                Self::replay_index_entry_inner(&mut idx, entry).await?;
             }
         }
         info!("Recovery: replayed {count} entries into hot store and index");
@@ -447,7 +468,11 @@ impl StorageEngine {
     pub async fn apply_replicated_entry(&self, entry: &WalEntry) -> Result<()> {
         Self::apply_wal_entry(&self.hot, entry)?;
         if let Some(ref idx_lock) = self.index {
-            Self::replay_index_entry(idx_lock, entry).await?;
+            #[cfg(not(feature = "legacy-locking"))]
+            let mut idx = idx_lock.write().await;
+            #[cfg(feature = "legacy-locking")]
+            let mut idx = idx_lock.lock().await;
+            Self::replay_index_entry_inner(&mut idx, entry).await?;
         }
         Ok(())
     }
@@ -464,6 +489,9 @@ impl StorageEngine {
             // 1. Persist index so the next session can reload it
             //    without a full WAL recovery.
             if let Some(ref idx_lock) = self.index {
+                #[cfg(not(feature = "legacy-locking"))]
+                let idx = idx_lock.write().await;
+                #[cfg(feature = "legacy-locking")]
                 let idx = idx_lock.lock().await;
                 let index_path = &self.config.index.path;
                 if let Some(parent) = index_path.parent() {
@@ -578,7 +606,7 @@ impl StorageEngine {
     ///
     /// Only `InsertVector` entries are currently indexed. Tombstones and
     /// metadata-only updates are ignored.
-    async fn replay_index_entry(idx_lock: &Mutex<AnyIndex>, entry: &WalEntry) -> Result<()> {
+    async fn replay_index_entry_inner(idx: &mut AnyIndex, entry: &WalEntry) -> Result<()> {
         if entry.op_code != OpCode::InsertVector as u8 {
             return Ok(());
         }
@@ -586,7 +614,6 @@ impl StorageEngine {
         let (id, vector, _metadata): (VectorId, Vec<f64>, serde_json::Value) =
             serde_json::from_slice(&entry.payload).map_err(|e| Error::JsonError(e.to_string()))?;
 
-        let mut idx = idx_lock.lock().await;
         // Skip duplicates silently (idempotent insert inside HnswIndex).
         let _ = idx.insert(id, &vector);
         Ok(())

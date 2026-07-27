@@ -12,6 +12,10 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+
+#[cfg(not(feature = "legacy-locking"))]
+use parking_lot::RwLock;
+#[cfg(feature = "legacy-locking")]
 use std::sync::RwLock;
 
 use rand::Rng;
@@ -229,7 +233,7 @@ impl<D: DistanceComputer> HnswIndex<D> {
 
         let query_f32: Vec<f32> = query.iter().map(|&x| x as f32).collect();
         let weights = mask.map(|m| mask_to_dense(m, self.dim));
-        let _lock = self.lock.read().unwrap();
+        let _lock = self.lock.read();
 
         if self.nodes.is_empty() {
             return Ok(vec![]);
