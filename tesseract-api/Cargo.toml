@@ -11,6 +11,7 @@ rust-version = "1.85"
 [features]
 default = []
 grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:tokio-stream", "tonic-build"]
+otel = ["dep:opentelemetry", "dep:opentelemetry-prometheus", "dep:opentelemetry_sdk"]
 
 [dependencies]
 axum = { version = "0.7", features = ["json"] }
@@ -20,7 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tesseract-vql = { path = "../tesseract-vql" }
 tesseract-storage = { path = "../tesseract-storage" }
 tesseract-core = { path = "../tesseract-core" }
@@ -34,6 +35,11 @@ tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
 prost-types = { version = "0.13", optional = true }
 tokio-stream = { version = "0.1", optional = true }
+
+# Observability (optional, enabled via `--features otel`)
+opentelemetry = { version = "0.27", features = ["metrics"], optional = true }
+opentelemetry-prometheus = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["metrics"], optional = true }
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }

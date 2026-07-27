@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Tesseract Contributors
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use tesseract_common::error::{Error, Result};
 
@@ -62,6 +60,9 @@ pub struct OpenAIEmbeddingService {
     client: reqwest::Client,
     config: OpenAIEmbeddingConfig,
 }
+
+#[cfg(feature = "openai-embedding")]
+use std::time::Duration;
 
 #[cfg(feature = "openai-embedding")]
 impl OpenAIEmbeddingService {

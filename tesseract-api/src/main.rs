@@ -53,10 +53,21 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging.
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    // Initialize logging with configurable format.
+    let log_format = std::env::var("TESSERACT_LOG_FORMAT").unwrap_or_else(|_| "text".into());
+    match log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+                .init();
+        }
+    }
 
     // Load configuration from environment.
     let data_dir = std::env::var("TESSERACT_DATA_DIR").unwrap_or_else(|_| "./data".into());
