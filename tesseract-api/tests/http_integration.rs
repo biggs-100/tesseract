@@ -110,7 +110,7 @@ async fn health_check_returns_200() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = collect_json(response).await;
-    assert_eq!(body["status"], "ok");
+    assert_eq!(body["status"], "pass");
     assert_eq!(body["version"], "0.1.0");
 }
 

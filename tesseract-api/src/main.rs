@@ -8,6 +8,10 @@
 //!
 //! - `TESSERACT_DATA_DIR` — data directory (default: `./data`)
 //! - `TESSERACT_LISTEN_ADDR` — bind address (default: `0.0.0.0:3000`)
+//! - `TESSERACT_AUTH_MODE` — auth mode: `none`, `api-key`, `jwt`, `both` (default: `none`)
+//! - `TESSERACT_API_KEYS` — comma-separated `key:role` pairs for API key auth
+//! - `TESSERACT_JWT_SECRET` — HMAC secret for JWT validation
+//! - `TESSERACT_QUERY_TIMEOUT_SECS` — implicit query timeout (default: `30`)
 
 use std::sync::Arc;
 
@@ -15,6 +19,7 @@ use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use tesseract_api::auth::create_auth_provider;
 use tesseract_api::http::{self, AppState};
 use tesseract_core::embedding::NoopEmbeddingService;
 use tesseract_core::episodic::EpisodicMemory;
@@ -89,8 +94,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let planner_config = PlannerConfig::default();
     let executor = Arc::new(QueryExecutor::new(storage.clone(), embedder, episodic, planner_config));
 
+    // Initialize auth provider.
+    let auth_provider = create_auth_provider();
+    if auth_provider.is_some() {
+        info!("Authentication enabled");
+    } else {
+        info!("Authentication disabled (dev mode)");
+    }
+
     let state = AppState { executor: executor.clone(), storage: storage.clone() };
-    let router = http::build_router(state);
+    let router = http::build_router_with_auth(state, auth_provider);
 
     // Start the gRPC server in a background task when the `grpc` feature is enabled.
     #[cfg(feature = "grpc")]
@@ -99,8 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let grpc_executor = executor.clone();
         let grpc_storage = storage.clone();
         let grpc_addr_clone = grpc_addr.clone();
+        let grpc_auth = create_auth_provider().map(|a| Arc::new(a));
         tokio::spawn(async move {
-            if let Err(e) = tesseract_api::grpc::serve_grpc(&grpc_addr_clone, grpc_executor, grpc_storage).await {
+            if let Err(e) =
+                tesseract_api::grpc::serve_grpc(&grpc_addr_clone, grpc_executor, grpc_storage, grpc_auth).await
+            {
                 tracing::error!("gRPC server error: {e}");
             }
         });

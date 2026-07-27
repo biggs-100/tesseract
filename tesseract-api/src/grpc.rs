@@ -18,6 +18,8 @@ use tesseract_storage::engine::StorageEngine;
 use tesseract_storage::types::WriteMode;
 use tesseract_vql::executor::QueryExecutor;
 
+use crate::auth::{AuthError, AuthProvider};
+
 // ---------------------------------------------------------------------------
 // Generated proto types
 // ---------------------------------------------------------------------------
@@ -39,6 +41,24 @@ use self::tesseract_query_server::{TesseractQuery, TesseractQueryServer};
 pub struct TesseractQueryService {
     pub executor: Arc<QueryExecutor>,
     pub storage: Arc<StorageEngine>,
+    pub auth: Option<Arc<Box<dyn AuthProvider>>>,
+}
+
+impl TesseractQueryService {
+    /// Check authentication for a gRPC request.
+    ///
+    /// Returns `Ok(())` if auth is disabled or passes, `Err(Status)` otherwise.
+    fn check_auth(&self, request: &http::Request<()>) -> Result<(), Status> {
+        if let Some(ref auth) = self.auth {
+            auth.authenticate(request.headers()).map(|_| ()).map_err(|e| match e {
+                AuthError::MissingCredentials => Status::unauthenticated("missing credentials"),
+                AuthError::InvalidCredentials(msg) => Status::unauthenticated(msg),
+                AuthError::ExpiredToken => Status::unauthenticated("token expired"),
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -46,6 +66,8 @@ impl TesseractQuery for TesseractQueryService {
     type QueryStream = ReceiverStream<Result<ScoredRecord, Status>>;
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<Self::QueryStream>, Status> {
+        self.check_auth(request.http())?;
+
         let req = request.into_inner();
         let vql = req.vql;
 
@@ -77,6 +99,8 @@ impl TesseractQuery for TesseractQueryService {
     }
 
     async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
+        self.check_auth(request.http())?;
+
         let req = request.into_inner();
 
         let id = req.id;
@@ -96,6 +120,7 @@ impl TesseractQuery for TesseractQueryService {
     }
 
     async fn health(&self, _request: Request<HealthRequest>) -> Result<Response<HealthResponse>, Status> {
+        // Health endpoint is exempt from auth
         Ok(Response::new(HealthResponse { status: "ok".to_string() }))
     }
 }
@@ -110,8 +135,9 @@ pub async fn serve_grpc(
     addr: &str,
     executor: Arc<QueryExecutor>,
     storage: Arc<StorageEngine>,
+    auth: Option<Arc<Box<dyn AuthProvider>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let service = TesseractQueryService { executor, storage };
+    let service = TesseractQueryService { executor, storage, auth };
     let socket_addr: std::net::SocketAddr = addr.parse()?;
 
     tonic::transport::Server::builder().add_service(TesseractQueryServer::new(service)).serve(socket_addr).await?;
@@ -156,14 +182,14 @@ mod tests {
         let storage = Arc::new(StorageEngine::open(config).await.unwrap());
         let embedder = Arc::new(NoopEmbeddingService) as Arc<dyn tesseract_core::embedding::EmbeddingService>;
         let episodic = Arc::new(EpisodicMemory::new());
-        let executor = Arc::new(QueryExecutor::new(storage.clone(), embedder, episodic, PlannerConfig::default()));
+        let executor = Arc::new(QueryExecutor::new(storage.clone(), embedder, episodic, PlannerConfig::default(), std::time::Duration::from_secs(30)));
         (storage, executor)
     }
 
     #[tokio::test]
     async fn test_health_rpc() {
         let (storage, executor) = test_storage_and_executor().await;
-        let service = TesseractQueryService { executor, storage };
+        let service = TesseractQueryService { executor, storage, auth: None };
 
         let request = Request::new(HealthRequest {});
         let response = service.health(request).await.unwrap();
@@ -175,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn test_insert_rpc() {
         let (storage, executor) = test_storage_and_executor().await;
-        let service = TesseractQueryService { executor: executor.clone(), storage: storage.clone() };
+        let service = TesseractQueryService { executor: executor.clone(), storage: storage.clone(), auth: None };
 
         let request = Request::new(InsertRequest {
             id: 42,
@@ -191,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn test_insert_rpc_invalid_metadata() {
         let (storage, executor) = test_storage_and_executor().await;
-        let service = TesseractQueryService { executor, storage };
+        let service = TesseractQueryService { executor, storage, auth: None };
 
         let request = Request::new(InsertRequest {
             id: 1,
