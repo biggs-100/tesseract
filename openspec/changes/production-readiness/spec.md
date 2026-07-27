@@ -259,11 +259,11 @@ Issues: A9 (test embedding) → A10 (CI audit)
 
 ### Acceptance Criteria
 
-- [ ] `TestEmbeddingService` passes unit tests for determinism and normalization
-- [ ] End-to-end test `INSERT` + `FIND SIMILARITY` with `TestEmbeddingService` passes
-- [ ] CI has an `audit` job running `cargo deny check advisories`
-- [ ] CI has a `coverage` job running `cargo llvm-cov`
-- [ ] Coverage warning fires below 70% without blocking the build
+- [x] `TestEmbeddingService` passes unit tests for determinism and normalization
+- [x] End-to-end test `INSERT` + `FIND SIMILARITY` with `TestEmbeddingService` passes
+- [x] CI has an `audit` job running `cargo deny check advisories`
+- [x] CI has a `coverage` job running `cargo llvm-cov`
+- [x] Coverage warning fires below 70% without blocking the build
 
 ---
 

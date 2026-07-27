@@ -776,7 +776,7 @@ Issues: A9 (test embedding) → A10 (CI audit)
 
 ### Issue A9 — Test Embedding Service
 
-#### PR3-T1: Implementar TestEmbeddingService
+#### PR3-T1: Implementar TestEmbeddingService `[x]`
 
 - **Issue**: A9 (test embedding)
 - **Archivos**: `tesseract-core/src/test_embedding.rs` (nuevo), `tesseract-core/Cargo.toml`, `tesseract-core/src/lib.rs`
@@ -827,7 +827,7 @@ Issues: A9 (test embedding) → A10 (CI audit)
   - Unit test: `embed("cat")` y `embed("dog")` producen vectores diferentes
 - **Estimado**: +70 líneas
 
-#### PR3-T2: Test e2e completo con TestEmbeddingService
+#### PR3-T2: Test e2e completo con TestEmbeddingService `[x]`
 
 - **Issue**: A9 (test embedding)
 - **Archivos**: `tesseract-core/tests/e2e_test_embedding.rs` (nuevo, o en `tesseract-api/tests/`)
@@ -859,7 +859,7 @@ Issues: A9 (test embedding) → A10 (CI audit)
 
 ### Issue A10 — CI Hardening
 
-#### PR3-T3: Agregar cargo-deny advisories a CI
+#### PR3-T3: Agregar cargo-deny advisories a CI `[x]`
 
 - **Issue**: A10 (CI audit)
 - **Archivos**: `.github/workflows/ci.yml`, `.cargo/deny.toml` (nuevo, si no existe)
@@ -890,7 +890,7 @@ Issues: A9 (test embedding) → A10 (CI audit)
   - No hay test automático para CI (verificar en GitHub después del merge)
 - **Estimado**: +30 líneas
 
-#### PR3-T4: Agregar cobertura con cargo-llvm-cov a CI
+#### PR3-T4: Agregar cobertura con cargo-llvm-cov a CI `[x]`
 
 - **Issue**: A10 (CI audit)
 - **Archivos**: `.github/workflows/ci.yml`
