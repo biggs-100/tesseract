@@ -226,26 +226,89 @@ curl -H "X-API-Key: sk-abc123" http://localhost:3000/query -d '{"vql": "FIND SIM
 ### MCP Server
 
 Tesseract includes an MCP (Model Context Protocol) server that lets AI agents
-(Claude Desktop, VS Code extensions, etc.) search and insert vectors directly:
+search and insert vectors. It speaks **stdio**, so it works with any MCP client.
+
+#### Quick start
 
 ```bash
-# Start the Tesseract API server
-cargo run -p tesseract-api &
+# Terminal 1: Start the Tesseract API
+cargo run -p tesseract-api
 
-# Start the MCP server (stdio transport)
+# Terminal 2: Start the MCP server (stdio)
 TESSERACT_API_URL=http://localhost:3000 cargo run -p tesseract-mcp
 ```
 
-**Available tools:**
+The MCP server reads the Tesseract API URL from `TESSERACT_API_URL` (default
+`http://localhost:3000`) and optionally authenticates via `TESSERACT_API_KEY`.
 
-| Tool | Description |
-|---|---|
-| `tesseract_query` | Execute VQL queries (`vql` parameter) |
-| `tesseract_insert` | Insert vectors (`id`, `vector`, optional `metadata`) |
-| `tesseract_status` | Check server health |
+#### Available tools
 
-The MCP server connects to the Tesseract HTTP API as a client. For authenticated
-environments, set `TESSERACT_API_KEY`.
+| Tool | Parameters | Description |
+|---|---|---|
+| `tesseract_query` | `vql` (string) | Execute any VQL query |
+| `tesseract_insert` | `id`, `vector`, `metadata?` | Insert a vector |
+| `tesseract_status` | — | Server health |
+
+#### Claude Desktop
+
+Add this to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "tesseract": {
+      "command": "cargo",
+      "args": ["run", "-p", "tesseract-mcp"],
+      "env": {
+        "TESSERACT_API_URL": "http://localhost:3000"
+      }
+    }
+  }
+}
+```
+
+If you have a compiled binary:
+
+```json
+{
+  "mcpServers": {
+    "tesseract": {
+      "command": "/path/to/tesseract-mcp",
+      "args": [],
+      "env": {
+        "TESSERACT_API_URL": "http://localhost:3000",
+        "TESSERACT_API_KEY": "sk-abc123"
+      }
+    }
+  }
+}
+```
+
+#### VS Code / Cline / Continue
+
+For any MCP-compatible editor extension, point to the binary:
+
+```json
+{
+  "mcpServers": {
+    "tesseract": {
+      "command": "cargo",
+      "args": ["run", "-p", "tesseract-mcp"],
+      "env": {
+        "TESSERACT_API_URL": "http://localhost:3000"
+      }
+    }
+  }
+}
+```
+
+#### Build a standalone binary
+
+```bash
+cargo build -p tesseract-mcp --release
+# Binary at: target/release/tesseract-mcp
+cp target/release/tesseract-mcp /usr/local/bin/
+```
 
 ### Observability
 
