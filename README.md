@@ -223,6 +223,30 @@ TESSERACT_AUTH_MODE=api-key TESSERACT_API_KEYS="sk-abc123:admin,sk-def456:reader
 curl -H "X-API-Key: sk-abc123" http://localhost:3000/query -d '{"vql": "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3)) LIMIT 5"}'
 ```
 
+### MCP Server
+
+Tesseract includes an MCP (Model Context Protocol) server that lets AI agents
+(Claude Desktop, VS Code extensions, etc.) search and insert vectors directly:
+
+```bash
+# Start the Tesseract API server
+cargo run -p tesseract-api &
+
+# Start the MCP server (stdio transport)
+TESSERACT_API_URL=http://localhost:3000 cargo run -p tesseract-mcp
+```
+
+**Available tools:**
+
+| Tool | Description |
+|---|---|
+| `tesseract_query` | Execute VQL queries (`vql` parameter) |
+| `tesseract_insert` | Insert vectors (`id`, `vector`, optional `metadata`) |
+| `tesseract_status` | Check server health |
+
+The MCP server connects to the Tesseract HTTP API as a client. For authenticated
+environments, set `TESSERACT_API_KEY`.
+
 ### Observability
 
 Tesseract exposes health checks, Prometheus metrics, and structured logging.
