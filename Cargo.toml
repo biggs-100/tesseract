@@ -12,6 +12,7 @@ members = [
     "tesseract-api",
     "tesseract-cluster",
     "tesseract-pg",
+    "tesseract-mcp",
 ]
 
 [workspace.package]
