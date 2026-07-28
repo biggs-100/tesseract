@@ -30,6 +30,10 @@ tesseract-storage = { path = "../tesseract-storage" }
 tesseract-core = { path = "../tesseract-core" }
 tesseract-common = { path = "../tesseract-common" }
 
+# OpenAPI
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "8", features = ["axum"] }
+
 # Auth
 jsonwebtoken = "9"
 

@@ -15,6 +15,8 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use tesseract_core::types::VectorId;
 use tesseract_storage::engine::StorageEngine;
@@ -39,14 +41,16 @@ pub struct AppState {
 // ---------------------------------------------------------------------------
 
 /// Query request body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct QueryRequest {
+    #[schema(example = "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3)) LIMIT 5")]
     pub vql: String,
+    #[schema(example = "user-123")]
     pub user_id: Option<String>,
 }
 
 /// Query response body.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct QueryResponse {
     pub success: bool,
     pub results: Vec<ScoredResult>,
@@ -56,7 +60,7 @@ pub struct QueryResponse {
 }
 
 /// Per-pipeline-stage timing breakdown, in milliseconds.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct QueryTimings {
     pub parse_ms: f64,
     pub plan_ms: f64,
@@ -65,7 +69,7 @@ pub struct QueryTimings {
 }
 
 /// Insert request body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct InsertRequest {
     pub id: u64,
     pub vector: Vec<f64>,
@@ -73,7 +77,7 @@ pub struct InsertRequest {
 }
 
 /// Insert response body.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct InsertResponse {
     pub success: bool,
     pub id: u64,
@@ -81,14 +85,14 @@ pub struct InsertResponse {
 }
 
 /// Health check response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
 }
 
 /// Readiness check diagnostics.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ReadinessResponse {
     pub status: String,
     pub checks: std::collections::HashMap<String, bool>,
@@ -182,7 +186,11 @@ pub fn build_router_with_config(
         .route("/health/readiness", get(readiness_handler))
         .route("/metrics", get(metrics_handler))
         // Keep /health as alias for /health/liveness for backwards compat
-        .route("/health", get(liveness_handler));
+        .route("/health", get(liveness_handler))
+        .route("/openapi.json", get(|| async {
+            axum::Json(ApiDoc::openapi())
+        }))
+        .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()));
 
     let mut protected_routes = Router::new()
         .route("/query", post(query_handler))
@@ -213,11 +221,28 @@ pub fn build_router_with_config(
 // ---------------------------------------------------------------------------
 
 /// `GET /health/liveness` — lightweight liveness probe.
+#[utoipa::path(
+    get,
+    path = "/health/liveness",
+    responses(
+        (status = 200, description = "Server is alive", body = HealthResponse),
+    ),
+    tag = "Health"
+)]
 async fn liveness_handler() -> Json<HealthResponse> {
     Json(HealthResponse { status: "pass".to_string(), version: "0.1.0".to_string() })
 }
 
 /// `GET /health/readiness` — checks WAL, index, and HotBuffer status.
+#[utoipa::path(
+    get,
+    path = "/health/readiness",
+    responses(
+        (status = 200, description = "Readiness check passed", body = ReadinessResponse),
+        (status = 503, description = "Service not ready", body = ReadinessResponse),
+    ),
+    tag = "Health"
+)]
 async fn readiness_handler(State(state): State<AppState>) -> impl IntoResponse {
     let checks = state.storage.is_ready();
     let all_ok = checks.values().all(|v| *v);
@@ -231,6 +256,14 @@ async fn readiness_handler(State(state): State<AppState>) -> impl IntoResponse {
 ///
 /// When the `otel` feature is enabled, this exports full OpenTelemetry metrics.
 /// Otherwise returns a lightweight set of counters.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    responses(
+        (status = 200, description = "Metrics in Prometheus text format"),
+    ),
+    tag = "Metrics"
+)]
 async fn metrics_handler() -> impl IntoResponse {
     // Basic metrics stub — will be replaced by OTel exporter when feature is enabled.
     let body = "# Tesseract Metrics (stub)
@@ -243,7 +276,20 @@ tesseract_errors_total 0
     (StatusCode::OK, [("content-type", "text/plain; charset=utf-8")], body)
 }
 
-/// `POST /query` — execute a VQL query and return scored results.
+/// Execute a VQL query and return scored results.
+#[utoipa::path(
+    post,
+    path = "/query",
+    request_body = QueryRequest,
+    responses(
+        (status = 200, description = "Query executed successfully", body = QueryResponse),
+        (status = 400, description = "Invalid VQL syntax", body = QueryResponse),
+    ),
+    security(
+        ("api_key" = [])
+    ),
+    tag = "Query"
+)]
 async fn query_handler(State(state): State<AppState>, Json(req): Json<QueryRequest>) -> impl IntoResponse {
     match state.executor.execute(&req.vql, req.user_id.as_deref()).await {
         Ok(result) => {
@@ -277,7 +323,20 @@ async fn query_handler(State(state): State<AppState>, Json(req): Json<QueryReque
     }
 }
 
-/// `POST /insert` — insert a vector with metadata.
+/// Insert a vector with metadata.
+#[utoipa::path(
+    post,
+    path = "/insert",
+    request_body = InsertRequest,
+    responses(
+        (status = 201, description = "Vector inserted successfully", body = InsertResponse),
+        (status = 400, description = "Invalid insert request", body = InsertResponse),
+    ),
+    security(
+        ("api_key" = [])
+    ),
+    tag = "Insert"
+)]
 async fn insert_handler(State(state): State<AppState>, Json(req): Json<InsertRequest>) -> impl IntoResponse {
     let metadata = req.metadata.unwrap_or(serde_json::json!({}));
     match state
@@ -291,3 +350,39 @@ async fn insert_handler(State(state): State<AppState>, Json(req): Json<InsertReq
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// OpenAPI documentation
+// ---------------------------------------------------------------------------
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        query_handler,
+        insert_handler,
+        liveness_handler,
+        readiness_handler,
+    ),
+    components(
+        schemas(
+            QueryRequest,
+            QueryResponse,
+            QueryTimings,
+            InsertRequest,
+            InsertResponse,
+            HealthResponse,
+            ReadinessResponse,
+        )
+    ),
+    tags(
+        (name = "Query", description = "Vector search queries"),
+        (name = "Insert", description = "Vector insertion"),
+        (name = "Health", description = "Server health and readiness"),
+    ),
+    info(
+        title = "Tesseract API",
+        version = "0.3.0",
+        description = "Semantic-relational vector database API. Execute VQL queries, insert vectors, and check server health.",
+    )
+)]
+pub struct ApiDoc;

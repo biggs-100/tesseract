@@ -24,7 +24,7 @@ use crate::planner::{PlanNode, PlannerConfig, QueryPlanner};
 // ---------------------------------------------------------------------------
 
 /// A scored search result.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct ScoredResult {
     pub id: u64,
     pub score: f32,

@@ -170,6 +170,10 @@ curl -X POST http://localhost:3000/query \
 
 # Health check
 curl http://localhost:3000/health/liveness
+
+# OpenAPI documentation (when server is running)
+curl http://localhost:3000/openapi.json
+# Or visit http://localhost:3000/docs in a browser
 ```
 
 ### Docker Compose
