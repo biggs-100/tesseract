@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use axum::http;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -19,6 +20,30 @@ use tesseract_storage::types::WriteMode;
 use tesseract_vql::executor::QueryExecutor;
 
 use crate::auth::{AuthError, AuthProvider};
+
+/// Build an `http::HeaderMap` from tonic metadata for auth checking.
+fn metadata_to_headers(metadata: &tonic::metadata::MetadataMap) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    for kv in metadata.iter() {
+        use tonic::metadata::KeyAndValueRef;
+        match kv {
+            KeyAndValueRef::Ascii(name, value) => {
+                if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_str().as_bytes()) {
+                    if let Ok(val_str) = value.to_str() {
+                        if let Ok(header_value) = http::header::HeaderValue::from_str(val_str) {
+                            headers.insert(header_name, header_value);
+                        }
+                    }
+                }
+            }
+            KeyAndValueRef::Binary(name, _) => {
+                // Skip binary metadata keys — auth only uses ASCII headers.
+                let _ = name;
+            }
+        }
+    }
+    headers
+}
 
 // ---------------------------------------------------------------------------
 // Generated proto types
@@ -48,9 +73,10 @@ impl TesseractQueryService {
     /// Check authentication for a gRPC request.
     ///
     /// Returns `Ok(())` if auth is disabled or passes, `Err(Status)` otherwise.
-    fn check_auth(&self, request: &http::Request<()>) -> Result<(), Status> {
+    fn check_auth(&self, metadata: &tonic::metadata::MetadataMap) -> Result<(), Status> {
         if let Some(ref auth) = self.auth {
-            auth.authenticate(request.headers()).map(|_| ()).map_err(|e| match e {
+            let headers = metadata_to_headers(metadata);
+            auth.authenticate(&headers).map(|_| ()).map_err(|e| match e {
                 AuthError::MissingCredentials => Status::unauthenticated("missing credentials"),
                 AuthError::InvalidCredentials(msg) => Status::unauthenticated(msg),
                 AuthError::ExpiredToken => Status::unauthenticated("token expired"),
@@ -66,7 +92,7 @@ impl TesseractQuery for TesseractQueryService {
     type QueryStream = ReceiverStream<Result<ScoredRecord, Status>>;
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<Self::QueryStream>, Status> {
-        self.check_auth(request.http())?;
+        self.check_auth(request.metadata())?;
 
         let req = request.into_inner();
         let vql = req.vql;
@@ -99,7 +125,7 @@ impl TesseractQuery for TesseractQueryService {
     }
 
     async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
-        self.check_auth(request.http())?;
+        self.check_auth(request.metadata())?;
 
         let req = request.into_inner();
 
@@ -152,6 +178,8 @@ pub async fn serve_grpc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Claims;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tesseract_core::embedding::NoopEmbeddingService;
     use tesseract_core::episodic::EpisodicMemory;
@@ -159,6 +187,12 @@ mod tests {
     use tesseract_storage::types::*;
     use tesseract_vql::executor::QueryExecutor;
     use tesseract_vql::planner::PlannerConfig;
+
+    fn make_api_key_auth() -> Option<Arc<Box<dyn AuthProvider>>> {
+        let mut keys = HashMap::new();
+        keys.insert("sk-valid".to_string(), Claims { sub: "test".to_string(), role: "admin".to_string() });
+        Some(Arc::new(Box::new(crate::auth::ApiKeyAuth::new(keys))))
+    }
 
     async fn test_storage_and_executor() -> (Arc<StorageEngine>, Arc<QueryExecutor>) {
         let dir = tempfile::tempdir().unwrap();
@@ -228,5 +262,99 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    // -----------------------------------------------------------------------
+    // gRPC auth tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_auth_query_with_valid_key_succeeds() {
+        let (storage, executor) = test_storage_and_executor().await;
+        let service = TesseractQueryService { executor, storage, auth: make_api_key_auth() };
+
+        let mut request = Request::new(QueryRequest { vql: "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3, 0.4)) LIMIT 5".into() });
+        request.metadata_mut().insert("x-api-key", tonic::metadata::MetadataValue::from_static("sk-valid"));
+
+        let result = service.query(request).await;
+        assert!(result.is_ok(), "query with valid API key should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_auth_query_without_key_returns_unauthenticated() {
+        let (storage, executor) = test_storage_and_executor().await;
+        let service = TesseractQueryService { executor, storage, auth: make_api_key_auth() };
+
+        let request = Request::new(QueryRequest { vql: "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3, 0.4)) LIMIT 5".into() });
+
+        let err = service.query(request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert!(err.message().contains("missing credentials"));
+    }
+
+    #[tokio::test]
+    async fn test_auth_query_with_invalid_key_returns_unauthenticated() {
+        let (storage, executor) = test_storage_and_executor().await;
+        let service = TesseractQueryService { executor, storage, auth: make_api_key_auth() };
+
+        let mut request = Request::new(QueryRequest { vql: "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3, 0.4)) LIMIT 5".into() });
+        request.metadata_mut().insert("x-api-key", tonic::metadata::MetadataValue::from_static("sk-wrong"));
+
+        let err = service.query(request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn test_auth_insert_with_valid_key_succeeds() {
+        let (storage, executor) = test_storage_and_executor().await;
+        let service = TesseractQueryService { executor, storage, auth: make_api_key_auth() };
+
+        let mut request = Request::new(InsertRequest {
+            id: 999,
+            vector: vec![0.1, 0.2, 0.3, 0.4],
+            metadata: None,
+        });
+        request.metadata_mut().insert("x-api-key", tonic::metadata::MetadataValue::from_static("sk-valid"));
+
+        let result = service.insert(request).await;
+        assert!(result.is_ok(), "insert with valid API key should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_auth_insert_without_key_returns_unauthenticated() {
+        let (storage, executor) = test_storage_and_executor().await;
+        let service = TesseractQueryService { executor, storage, auth: make_api_key_auth() };
+
+        let request = Request::new(InsertRequest {
+            id: 998,
+            vector: vec![0.1, 0.2, 0.3, 0.4],
+            metadata: None,
+        });
+
+        let err = service.insert(request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn test_auth_health_exempt_from_auth() {
+        let (storage, executor) = test_storage_and_executor().await;
+        let service = TesseractQueryService { executor, storage, auth: make_api_key_auth() };
+
+        // Health endpoint must succeed without any auth headers.
+        let request = Request::new(HealthRequest {});
+        let result = service.health(request).await;
+        assert!(result.is_ok(), "health endpoint should be exempt from auth");
+        assert_eq!(result.unwrap().into_inner().status, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_auth_disabled_in_none_mode() {
+        let (storage, executor) = test_storage_and_executor().await;
+        // auth: None means auth is disabled
+        let service = TesseractQueryService { executor, storage, auth: None };
+
+        let request = Request::new(QueryRequest { vql: "FIND SIMILARITY(emb, VECTOR(0.1, 0.2, 0.3, 0.4)) LIMIT 5".into() });
+        let result = service.query(request).await;
+        assert!(result.is_ok(), "query should work without auth when auth is disabled");
     }
 }
