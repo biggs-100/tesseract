@@ -42,6 +42,9 @@ pub enum Error {
     #[error("JSON error: {0}")]
     JsonError(String),
 
+    #[error("Store is full: {0}")]
+    StoreFull(String),
+
     #[error("{0} already exists")]
     AlreadyExists(String),
 

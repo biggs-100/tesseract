@@ -34,20 +34,36 @@ impl Default for HotStoreConfig {
 /// Fast in-memory store backed by DashMap for concurrent reads/writes.
 pub struct HotStore {
     vectors: Arc<DashMap<VectorId, VectorRecord>>,
-    _config: HotStoreConfig,
+    config: HotStoreConfig,
 }
 
 impl HotStore {
     /// Create a new hot store with the given configuration.
     pub fn new(config: HotStoreConfig) -> Self {
-        Self { vectors: Arc::new(DashMap::new()), _config: config }
+        Self { vectors: Arc::new(DashMap::new()), config }
+    }
+
+    /// Maximum number of records before the store rejects new inserts.
+    /// Returns `None` when unlimited (max_records == 0).
+    pub fn max_records(&self) -> Option<usize> {
+        if self.config.max_records > 0 { Some(self.config.max_records) } else { None }
     }
 
     /// Insert a vector record.
     ///
-    /// Returns `Err(AlreadyExists)` if a record with the same `VectorId`
-    /// is already present.
+    /// Returns `Err(StoreFull)` if the store has reached its `max_records`
+    /// capacity. Returns `Err(AlreadyExists)` if a record with the same
+    /// `VectorId` is already present.
     pub fn insert(&self, record: VectorRecord) -> Result<()> {
+        // Enforce capacity limit before checking duplicates.
+        if let Some(max) = self.max_records() {
+            if self.vectors.len() >= max {
+                return Err(Error::StoreFull(format!(
+                    "Hot store capacity reached: {max} records. Use drain_least_accessed() to free space."
+                )));
+            }
+        }
+
         let id = record.id.clone();
         match self.vectors.entry(id) {
             Entry::Occupied(_) => {
@@ -242,6 +258,27 @@ mod tests {
         }
 
         assert_eq!(store.len(), 800);
+    }
+
+    #[test]
+    fn insert_rejects_when_full() {
+        let store = HotStore::new(HotStoreConfig { max_records: 2 });
+        assert!(store.insert(make_record(1, 0)).is_ok());
+        assert!(store.insert(make_record(2, 0)).is_ok());
+        let err = store.insert(make_record(3, 0)).unwrap_err();
+        match err {
+            Error::StoreFull(msg) => assert!(msg.contains("capacity reached")),
+            _ => panic!("expected StoreFull, got {err}"),
+        }
+    }
+
+    #[test]
+    fn unlimited_when_max_records_zero() {
+        let store = HotStore::new(HotStoreConfig { max_records: 0 });
+        for i in 0..10_000u64 {
+            assert!(store.insert(make_record(i, 0)).is_ok());
+        }
+        assert_eq!(store.len(), 10_000);
     }
 
     #[test]

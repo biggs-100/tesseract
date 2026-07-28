@@ -285,7 +285,24 @@ impl StorageEngine {
             access_count: 0,
         };
 
-        self.hot.insert(record)?;
+        // Try hot store insert. If the store is full, drain least-accessed
+        // records to the cold store, then retry.
+        if let Err(Error::StoreFull(_)) = self.hot.insert(record.clone()) {
+            tracing::warn!("Hot store full, evicting least-accessed records to cold store");
+            let evicted = self.hot.drain_least_accessed(100);
+            if !evicted.is_empty() {
+                use crate::cold_store::PartitionId;
+                let day = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() / 86400;
+                let partition = PartitionId(day);
+                self.cold.write_batch(&partition, &evicted).await?;
+                tracing::info!("Evicted {} records to cold store partition {partition:?}", evicted.len());
+            }
+            // Retry the insert now that space is freed.
+            self.hot.insert(record)?;
+        }
 
         // Insert into ANN index (if enabled) so the vector is searchable
         // immediately.
