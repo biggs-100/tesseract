@@ -55,7 +55,7 @@ pub struct ApiKeyAuth {
 }
 
 impl ApiKeyAuth {
-    /// Create from a pre-built key map (for testing).
+    /// Create from a pre-built key map (avoids env var dependency).
     pub fn new(keys: HashMap<String, Claims>) -> Self {
         Self { keys }
     }
