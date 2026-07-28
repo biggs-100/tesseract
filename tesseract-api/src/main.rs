@@ -3,17 +3,24 @@
 
 //! Tesseract API server binary.
 //!
-//! Starts an HTTP server exposing the VQL query engine and vector storage
-//! over a REST API. Configured via environment variables:
+//! Starts an HTTP (or HTTPS with `--features tls`) server exposing the VQL
+//! query engine and vector storage over a REST API.
 //!
-//! - `TESSERACT_DATA_DIR` — data directory (default: `./data`)
-//! - `TESSERACT_LISTEN_ADDR` — bind address (default: `0.0.0.0:3000`)
-//! - `TESSERACT_AUTH_MODE` — auth mode: `none`, `api-key`, `jwt`, `both` (default: `none`)
-//! - `TESSERACT_API_KEYS` — comma-separated `key:role` pairs for API key auth
-//! - `TESSERACT_JWT_SECRET` — HMAC secret for JWT validation
-//! - `TESSERACT_RATE_LIMIT_RPM` — max requests per minute per IP (default: `100`)
-//! - `TESSERACT_QUERY_TIMEOUT_SECS` — implicit query timeout (default: `30`)
-//! - `TESSERACT_LOG_FORMAT` — log format: `text` or `json` (default: `text`)
+//! ## Environment variables
+//!
+//! | Variable | Default | Description |
+//! |---|---|---|
+//! | `TESSERACT_DATA_DIR` | `./data` | Data directory |
+//! | `TESSERACT_LISTEN_ADDR` | `0.0.0.0:3000` | HTTP(S) bind address |
+//! | `TESSERACT_AUTH_MODE` | `none` | Auth mode: `none`, `api-key`, `jwt`, `both` |
+//! | `TESSERACT_API_KEYS` | — | Comma-separated `key:role` pairs |
+//! | `TESSERACT_JWT_SECRET` | `dev-secret` | HMAC secret for JWT |
+//! | `TESSERACT_RATE_LIMIT_RPM` | `100` | Max requests/min per IP |
+//! | `TESSERACT_QUERY_TIMEOUT_SECS` | `30` | Implicit query timeout |
+//! | `TESSERACT_LOG_FORMAT` | `text` | Log format: `text` or `json` |
+//! | `TESSERACT_SHUTDOWN_TIMEOUT_SECS` | `30` | Shutdown drain timeout |
+//! | `TESSERACT_TLS_CERT_PATH` | — | Path to TLS certificate (PEM) |
+//! | `TESSERACT_TLS_KEY_PATH` | — | Path to TLS private key (PEM) |
 
 use std::sync::Arc;
 
@@ -157,15 +164,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Tesseract gRPC listening on {}", grpc_addr);
     }
 
-    tracing::info!("Tesseract API listening on {}", listen_addr);
+    let storage_for_shutdown = storage.clone();
 
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    #[cfg(feature = "tls")]
+    {
+        let cert_path = std::env::var("TESSERACT_TLS_CERT_PATH").ok();
+        let key_path = std::env::var("TESSERACT_TLS_KEY_PATH").ok();
+
+        let addr: std::net::SocketAddr = listen_addr.parse()?;
+
+        if let (Some(cert), Some(key)) = (cert_path, key_path) {
+            tracing::info!("Tesseract API listening on https://{addr}");
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+            let handle = axum_server::Handle::new();
+            let server_handle = handle.clone();
+            let shutdown = shutdown_signal();
+
+            // Run the server in the background so we can await the signal.
+            let server = tokio::spawn(async move {
+                axum_server::bind_rustls(addr, tls_config)
+                    .handle(server_handle)
+                    .serve(router.into_make_service())
+                    .await
+            });
+
+            // Wait for shutdown signal.
+            shutdown.await;
+
+            // Trigger graceful shutdown with timeout.
+            handle.graceful_shutdown(Some(std::time::Duration::from_secs(shutdown_timeout)));
+            server.await??;
+        } else {
+            tracing::info!("Tesseract API listening on http://{addr}");
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown_signal())
+                .await?;
+        }
+    }
+
+    #[cfg(not(feature = "tls"))]
+    {
+        tracing::info!("Tesseract API listening on http://{listen_addr}");
+        let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+    }
 
     // After axum stops accepting new connections, run storage engine shutdown.
-    storage.shutdown().await?;
+    storage_for_shutdown.shutdown().await?;
 
     Ok(())
 }

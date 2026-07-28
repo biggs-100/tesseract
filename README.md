@@ -181,6 +181,25 @@ docker compose up -d
 
 ---
 
+### TLS
+
+Tesseract supports HTTPS via the `--features tls` feature flag using `axum-server` with `rustls`:
+
+```bash
+# Generate a self-signed cert (dev) or use your CA-signed cert
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+
+# Start with HTTPS
+TESSERACT_TLS_CERT_PATH=cert.pem TESSERACT_TLS_KEY_PATH=key.pem \
+  cargo run -p tesseract-api --features tls
+
+# Query via HTTPS
+curl -k https://localhost:3000/health/liveness
+```
+
+Without `--features tls`, the server runs in plain HTTP mode. TLS and non-TLS builds
+share the same binary — just add the feature flag for HTTPS.
+
 ### Authentication
 
 Tesseract supports three authentication modes, configured via `TESSERACT_AUTH_MODE`:
@@ -286,6 +305,8 @@ for ingestion by log aggregators.
 | `TESSERACT_EMBEDDING_TIMEOUT_SECS` | `30` | Per-request timeout for embedding API calls |
 | `TESSERACT_EMBEDDING_RETRY_MAX` | `3` | Max retries on embedding API rate limits (429) or server errors (5xx) |
 | `TESSERACT_LOG_FORMAT` | `text` | Log output format: `text` or `json` |
+| `TESSERACT_TLS_CERT_PATH` | — | Path to TLS certificate (PEM). Requires `--features tls` |
+| `TESSERACT_TLS_KEY_PATH` | — | Path to TLS private key (PEM). Requires `--features tls` |
 | `RUST_LOG` | `info` | Logging level (e.g. `debug`, `trace`, `warn`) |
 
 ---

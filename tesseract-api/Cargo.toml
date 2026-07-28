@@ -12,9 +12,12 @@ rust-version = "1.85"
 default = []
 grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:tokio-stream", "tonic-build"]
 otel = ["dep:opentelemetry", "dep:opentelemetry-prometheus", "dep:opentelemetry_sdk"]
+tls = ["dep:axum-server", "dep:rustls-pemfile"]
 
 [dependencies]
 axum = { version = "0.7", features = ["json"] }
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 serde = { version = "1", features = ["derive"] }
