@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] — 2026-07-27
+
+### Added
+
+- **TLS Support** — Optional HTTPS via `--features tls` using axum-server + rustls.
+  `TESSERACT_TLS_CERT_PATH` and `TESSERACT_TLS_KEY_PATH` env vars (PEM format).
+  Falls back to HTTP when no certs are configured.
+- **MCP Server** — New crate `tesseract-mcp` implementing the Model Context Protocol
+  over stdio transport. Exposes 3 tools (`tesseract_query`, `tesseract_insert`,
+  `tesseract_status`) for AI agents (Claude Desktop, VS Code, etc.).
+- **Hot Store Eviction** — HotStore capacity enforcement via `max_records` config.
+  When full, least-accessed records are auto-evicted to cold store.
+- **gRPC Auth** — Auth interceptor for gRPC endpoints (query, insert). Health is
+  exempt. 7 new tests covering all auth scenarios.
+
+### Changed
+
+- **HTTP Integration Tests** — Expanded from 5 to 14 tests covering auth (API key,
+  JWT, missing/invalid), rate limiting (under/over limit), public route bypass,
+  and combined auth + rate limiting scenarios.
+- **CI Pipeline** — New `tls` job (build + test with `--features tls`) and `mcp`
+  job (build tesseract-mcp crate).
+
+### Fixed
+
+- **gRPC Auth Bug** — `check_auth` was calling `request.http()` which doesn't
+  exist in tonic 0.12. Replaced with `request.metadata()` and a
+  `metadata_to_headers()` converter.
+
+### Tests
+
+- 521+ tests (up from 511+).
+- 7 new HTTP integration tests (auth, rate limiting, combined).
+- 7 new gRPC auth tests.
+
 ## [0.2.0] — 2026-07-27
 
 ### Added
